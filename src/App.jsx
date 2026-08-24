@@ -25,7 +25,16 @@ const T = {
   red: "#E5484D",
 };
 
-const uid = () => Math.random().toString(36).slice(2, 10);
+// generates a real UUID (required by Supabase's uuid columns) —
+// uses the browser's built-in generator when available, with a safe fallback
+const uid = () => {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+};
 const money = (n) => "Rs " + Number(n || 0).toLocaleString("en-IN");
 const today = () => new Date().toISOString().slice(0, 10);
 
