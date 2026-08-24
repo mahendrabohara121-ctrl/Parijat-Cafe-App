@@ -274,7 +274,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState("overview");
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [currentUser, setCurrentUser] = useState(null); // session-only, not persisted — logs out on reload
+  const [currentUser, setCurrentUser] = useState(null); // restored from localStorage after data loads, if a session exists
   const [loginError, setLoginError] = useState("");
 
   const [menu, setMenu] = useState([]);
@@ -323,6 +323,21 @@ export default function App() {
 
       const { data: staffList } = await supabase.rpc("list_staff");
       setStaff(staffList || []);
+
+      // restore a previous login session (if any) so refreshing doesn't force a re-login
+      try {
+        const savedId = localStorage.getItem("parijat_session_id");
+        if (savedId && staffList) {
+          const match = staffList.find((s) => s.id === savedId && s.active);
+          if (match) {
+            setCurrentUser(match);
+            setActive(ROLE_ACCESS[match.role][0] || "overview");
+          } else {
+            localStorage.removeItem("parijat_session_id"); // account deleted/deactivated since last login
+          }
+        }
+      } catch (e) { /* localStorage unavailable — just skip session restore */ }
+
       setLoading(false);
     })();
   }, []);
@@ -371,9 +386,14 @@ export default function App() {
     if (!found.active) { setLoginError("This account has been deactivated. Ask the owner to reactivate it."); return; }
     setLoginError("");
     setCurrentUser(found);
+    try { localStorage.setItem("parijat_session_id", found.id); } catch (e) { /* ignore */ }
     setActive(ROLE_ACCESS[found.role][0] || "overview");
   };
-  const logout = () => { setCurrentUser(null); setActive("overview"); };
+  const logout = () => {
+    setCurrentUser(null);
+    setActive("overview");
+    try { localStorage.removeItem("parijat_session_id"); } catch (e) { /* ignore */ }
+  };
 
   if (loading) {
     return (
