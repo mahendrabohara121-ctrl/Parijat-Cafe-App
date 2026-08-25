@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import {
   LayoutDashboard, ClipboardList, LayoutGrid, Package, Wallet, UtensilsCrossed,
   Users, ChefHat, BarChart3, QrCode, ShoppingBag, Gift, Share2, Plus, X, Trash2,
-  Check, Clock, Flame, AlertTriangle, TrendingUp, TrendingDown, Search, Menu as MenuIcon, Shield, Eye, EyeOff, LogOut
+  Check, Clock, Flame, AlertTriangle, TrendingUp, TrendingDown, Search, Menu as MenuIcon, Shield, Eye, EyeOff, LogOut, Truck
 } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -76,8 +76,8 @@ const ROLES = [
 ];
 // which modules each role can see. "staff" (Staff Management) is owner-only.
 const ROLE_ACCESS = {
-  owner: ["overview", "orders", "kds", "tables", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "staff"],
-  manager: ["overview", "orders", "kds", "tables", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer"],
+  owner: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "staff"],
+  manager: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer"],
   cashier: ["overview", "orders", "tables", "accounting", "crm", "sales", "qr", "online", "loyalty", "refer"],
   barista: ["kds", "orders"],
 };
@@ -136,6 +136,17 @@ const TABLE_MAP = {
     table: "referrals",
     toDb: (r) => ({ id: r.id, referrer_id: r.referrerId || null, referrer_name: r.referrerName, referee_name: r.refereeName, referee_phone: r.refereePhone || null, status: r.status, date: r.date }),
     fromDb: (r) => ({ id: r.id, referrerId: r.referrer_id, referrerName: r.referrer_name, refereeName: r.referee_name, refereePhone: r.referee_phone, status: r.status, date: r.date }),
+  },
+  purchases: {
+    table: "purchases",
+    toDb: (p) => ({
+      id: p.id, item_id: p.itemId || null, item_name: p.itemName, quantity: p.quantity, unit: p.unit,
+      unit_cost: p.unitCost, total_cost: p.totalCost, supplier: p.supplier || null, notes: p.notes || null, date: p.date,
+    }),
+    fromDb: (r) => ({
+      id: r.id, itemId: r.item_id, itemName: r.item_name, quantity: Number(r.quantity), unit: r.unit,
+      unitCost: Number(r.unit_cost), totalCost: Number(r.total_cost), supplier: r.supplier, notes: r.notes, date: r.date,
+    }),
   },
 };
 
@@ -285,6 +296,7 @@ export default function App() {
   const [expenses, setExpenses] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [referrals, setReferrals] = useState([]);
+  const [purchases, setPurchases] = useState([]);
   const [staff, setStaff] = useState([]);
 
   useEffect(() => {
@@ -297,7 +309,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const [m, t, o, inv, w, exp, cust, ref] = await Promise.all([
+      const [m, t, o, inv, w, exp, cust, ref, purch] = await Promise.all([
         fetchTable("menu"),
         fetchTable("tables"),
         fetchTable("orders"),
@@ -306,6 +318,7 @@ export default function App() {
         fetchTable("expenses"),
         fetchTable("customers"),
         fetchTable("referrals"),
+        fetchTable("purchases"),
       ]);
       // seed empty tables on very first run so the app isn't blank
       setMenu(m.length ? m : SEED_MENU);
@@ -316,6 +329,7 @@ export default function App() {
       setExpenses(exp);
       setCustomers(cust.length ? cust : SEED_CUSTOMERS);
       setReferrals(ref);
+      setPurchases(purch);
       if (!m.length) syncTable("menu", [], SEED_MENU);
       if (!t.length) syncTable("tables", [], SEED_TABLES);
       if (!inv.length) syncTable("inventory", [], SEED_INVENTORY);
@@ -352,6 +366,7 @@ export default function App() {
     expenses: (v) => { const prev = expenses; setExpenses(v); syncTable("expenses", prev, v); },
     customers: (v) => { const prev = customers; setCustomers(v); syncTable("customers", prev, v); },
     referrals: (v) => { const prev = referrals; setReferrals(v); syncTable("referrals", prev, v); },
+    purchases: (v) => { const prev = purchases; setPurchases(v); syncTable("purchases", prev, v); },
     refreshStaff: async () => {
       const { data } = await supabase.rpc("list_staff");
       setStaff(data || []);
@@ -363,6 +378,7 @@ export default function App() {
     { id: "orders", label: "Order & KOT", icon: ClipboardList, group: "Operate" },
     { id: "kds", label: "Kitchen Display", icon: ChefHat, group: "Operate" },
     { id: "tables", label: "Table & Space", icon: LayoutGrid, group: "Operate" },
+    { id: "purchase", label: "Purchase", icon: Truck, group: "Operate" },
     { id: "inventory", label: "Inventory & Waste", icon: Package, group: "Operate" },
     { id: "accounting", label: "Accounting", icon: Wallet, group: "Operate" },
     { id: "menu", label: "Menu Management", icon: UtensilsCrossed, group: "Operate" },
@@ -469,6 +485,7 @@ export default function App() {
           {active === "orders" && <Orders menu={menu} tables={tables} orders={orders} setOrders={persist.orders} setTables={persist.tables} customers={customers} setCustomers={persist.customers} />}
           {active === "kds" && <KDS orders={orders} setOrders={persist.orders} tables={tables} setTables={persist.tables} />}
           {active === "tables" && <TablesView tables={tables} setTables={persist.tables} orders={orders} />}
+          {active === "purchase" && <PurchaseManagement purchases={purchases} setPurchases={persist.purchases} inventory={inventory} setInventory={persist.inventory} />}
           {active === "inventory" && <Inventory inventory={inventory} setInventory={persist.inventory} waste={waste} setWaste={persist.waste} />}
           {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} />}
           {active === "menu" && <MenuManagement menu={menu} setMenu={persist.menu} />}
@@ -623,6 +640,19 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
   const toneFor = { placed: "warn", preparing: "gold", ready: "good", served: "neutral", paid: "good", cancelled: "bad" };
   const nextLabel = { placed: "Send to Kitchen", preparing: "Mark Ready", ready: "Mark Served", served: "Mark Paid" };
 
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const sheet = orders.map((o) => ({
+      Date: o.createdAt ? o.createdAt.slice(0, 10) : "",
+      Table: o.tableName, Source: o.source, Status: o.status,
+      Items: o.items.map((it) => `${it.qty}x ${it.name}`).join(", "),
+      "Payment Method": PAYMENT_METHODS.find((p) => p.id === o.paymentMethod)?.label || "",
+      "Total (Rs)": o.total,
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Orders");
+    XLSX.writeFile(wb, `parijat-cafe-orders-${today()}.xlsx`);
+  };
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
@@ -630,7 +660,10 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
           <Btn variant={filter === "active" ? "gold" : "ghost"} onClick={() => setFilter("active")}>Active</Btn>
           <Btn variant={filter === "all" ? "gold" : "ghost"} onClick={() => setFilter("all")}>All</Btn>
         </div>
-        <Btn variant="primary" onClick={() => setModal(true)}><Plus size={15} /> New Order</Btn>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn variant="ghost" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+          <Btn variant="primary" onClick={() => setModal(true)}><Plus size={15} /> New Order</Btn>
+        </div>
       </div>
 
       {visible.length === 0 ? <Card style={{ padding: 20 }}><Empty text="No orders here yet." /></Card> : (
@@ -838,8 +871,20 @@ function Inventory({ inventory, setInventory, waste, setWaste }) {
     setWasteForm({ itemId: "", qty: "", reason: "" }); setWasteModal(false);
   };
 
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const stockSheet = inventory.map((i) => ({ Item: i.name, Stock: i.stock, Unit: i.unit, "Reorder Level": i.reorder, Status: i.stock <= i.reorder ? "Reorder now" : "Healthy" }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(stockSheet), "Stock");
+    const wasteSheet = waste.map((w) => ({ Date: w.date, Item: w.itemName, Quantity: w.qty, Unit: w.unit, Reason: w.reason }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(wasteSheet), "Waste Log");
+    XLSX.writeFile(wb, `parijat-cafe-inventory-${today()}.xlsx`);
+  };
+
   return (
     <div>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+        <Btn variant="ghost" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+      </div>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
         <div style={{ display: "flex", gap: 8 }}>
           <Btn variant={tab === "stock" ? "gold" : "ghost"} onClick={() => setTab("stock")}>Stock</Btn>
@@ -1053,9 +1098,17 @@ function MenuManagement({ menu, setMenu }) {
 
   const categories = [...new Set(menu.map((m) => m.category))];
 
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const sheet = menu.map((m) => ({ Name: m.name, Category: m.category, "Price (Rs)": m.price, Type: m.veg ? "Veg" : "Non-Veg", Available: m.available ? "Yes" : "No" }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Menu");
+    XLSX.writeFile(wb, `parijat-cafe-menu-${today()}.xlsx`);
+  };
+
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16, gap: 8 }}>
+        <Btn variant="ghost" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
         <Btn variant="primary" onClick={openNew}><Plus size={15} /> Add Menu Item</Btn>
       </div>
       {categories.map((cat) => (
@@ -1116,6 +1169,13 @@ function CRM({ customers, setCustomers, orders }) {
   const remove = (id) => setCustomers(customers.filter((c) => c.id !== id));
   const filtered = customers.filter((c) => c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search));
 
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const sheet = customers.map((c) => ({ Name: c.name, Phone: c.phone, Visits: c.visits, Points: c.points, "Referral Code": c.referralCode, Notes: c.notes }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Customers");
+    XLSX.writeFile(wb, `parijat-cafe-customers-${today()}.xlsx`);
+  };
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16, gap: 10, flexWrap: "wrap" }}>
@@ -1123,7 +1183,10 @@ function CRM({ customers, setCustomers, orders }) {
           <Search size={14} style={{ position: "absolute", left: 10, top: 10, color: T.plum, opacity: 0.5 }} />
           <input style={{ ...inputStyle, paddingLeft: 30 }} placeholder="Search customers…" value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
-        <Btn variant="primary" onClick={() => setModal(true)}><Plus size={15} /> Add Customer</Btn>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn variant="ghost" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+          <Btn variant="primary" onClick={() => setModal(true)}><Plus size={15} /> Add Customer</Btn>
+        </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 12 }}>
         {filtered.map((c) => (
@@ -1400,6 +1463,13 @@ function ReferEarn({ customers, referrals, setReferrals, setCustomers }) {
     setCustomers(customers.map((c) => c.id === r.referrerId ? { ...c, points: c.points + 150 } : c));
   };
 
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const sheet = referrals.map((r) => ({ Date: r.date, Referrer: r.referrerName, "New Guest": r.refereeName, Phone: r.refereePhone, Status: r.status }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Referrals");
+    XLSX.writeFile(wb, `parijat-cafe-referrals-${today()}.xlsx`);
+  };
+
   return (
     <div>
       <Card style={{ padding: 18, marginBottom: 20 }}>
@@ -1408,7 +1478,10 @@ function ReferEarn({ customers, referrals, setReferrals, setCustomers }) {
       </Card>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
         <h3 style={{ fontFamily: "inherit", fontSize: 15, color: T.dusk }}>Referral Codes</h3>
-        <Btn variant="primary" onClick={() => setModal(true)}><Plus size={15} /> Log Referral</Btn>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn variant="ghost" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+          <Btn variant="primary" onClick={() => setModal(true)}><Plus size={15} /> Log Referral</Btn>
+        </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(200px,1fr))", gap: 10, marginBottom: 24 }}>
         {customers.map((c) => (
@@ -1570,6 +1643,140 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
             </select>
           </Field>
           <Btn variant="primary" onClick={save} disabled={saving} style={{ width: "100%", justifyContent: "center" }}>{saving ? "Saving…" : editing ? "Save Changes" : "Create Staff ID"}</Btn>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ================= PURCHASE MANAGEMENT ================= */
+function PurchaseManagement({ purchases, setPurchases, inventory, setInventory }) {
+  const [modal, setModal] = useState(false);
+  const [form, setForm] = useState({ itemId: "", itemName: "", quantity: "", unit: "kg", unitCost: "", supplier: "", notes: "" });
+  const [mode, setMode] = useState("existing"); // "existing" inventory item, or "new" one-off item
+
+  const openNew = () => {
+    setForm({ itemId: "", itemName: "", quantity: "", unit: "kg", unitCost: "", supplier: "", notes: "" });
+    setMode("existing");
+    setModal(true);
+  };
+
+  const onPickItem = (id) => {
+    const item = inventory.find((i) => i.id === id);
+    setForm({ ...form, itemId: id, itemName: item ? item.name : "", unit: item ? item.unit : form.unit });
+  };
+
+  const totalCost = (Number(form.quantity) || 0) * (Number(form.unitCost) || 0);
+
+  const save = () => {
+    if (!form.itemName || !form.quantity || !form.unitCost) return;
+    const entry = {
+      id: uid(),
+      itemId: mode === "existing" ? form.itemId || null : null,
+      itemName: form.itemName,
+      quantity: Number(form.quantity),
+      unit: form.unit,
+      unitCost: Number(form.unitCost),
+      totalCost,
+      supplier: form.supplier,
+      notes: form.notes,
+      date: today(),
+    };
+    setPurchases([...purchases, entry]);
+
+    // if this purchase matches an existing inventory item, bump its stock automatically
+    if (entry.itemId) {
+      setInventory(inventory.map((i) => (i.id === entry.itemId ? { ...i, stock: i.stock + entry.quantity } : i)));
+    }
+    setModal(false);
+  };
+
+  const remove = (id) => setPurchases(purchases.filter((p) => p.id !== id));
+
+  const totalSpend = purchases.reduce((s, p) => s + p.totalCost, 0);
+  const thisMonthSpend = purchases.filter((p) => p.date.slice(0, 7) === today().slice(0, 7)).reduce((s, p) => s + p.totalCost, 0);
+
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const sheet = purchases.map((p) => ({
+      Date: p.date, Item: p.itemName, Quantity: p.quantity, Unit: p.unit,
+      "Unit Cost (Rs)": p.unitCost, "Total Cost (Rs)": p.totalCost, Supplier: p.supplier, Notes: p.notes,
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Purchases");
+    XLSX.writeFile(wb, `parijat-cafe-purchases-${today()}.xlsx`);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 14, marginBottom: 20 }}>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Purchase Spend</div><div style={{ fontSize: 22, fontWeight: 700, color: T.dusk }}>{money(totalSpend)}</div></Card>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>This Month</div><div style={{ fontSize: 22, fontWeight: 700, color: T.dusk }}>{money(thisMonthSpend)}</div></Card>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Purchase Entries</div><div style={{ fontSize: 22, fontWeight: 700, color: T.dusk }}>{purchases.length}</div></Card>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+        <Btn variant="primary" onClick={openNew}><Plus size={15} /> Log Purchase</Btn>
+        <Btn variant="ghost" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+      </div>
+
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        {purchases.length === 0 ? <Empty text="No purchases logged yet. Log a restock to track supplier spend." /> : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+            <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}>
+              <th style={{ padding: "10px 14px" }}>Date</th><th>Item</th><th>Qty</th><th>Unit Cost</th><th>Total</th><th>Supplier</th><th></th>
+            </tr></thead>
+            <tbody>
+              {purchases.slice().reverse().map((p) => (
+                <tr key={p.id} style={{ borderTop: `1px solid ${T.line}` }}>
+                  <td style={{ padding: "10px 14px", opacity: 0.7 }}>{p.date}</td>
+                  <td style={{ fontWeight: 600 }}>{p.itemName}</td>
+                  <td>{p.quantity} {p.unit}</td>
+                  <td>{money(p.unitCost)}</td>
+                  <td>{money(p.totalCost)}</td>
+                  <td>{p.supplier || "—"}</td>
+                  <td><button onClick={() => remove(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: T.plum, opacity: 0.5 }}><Trash2 size={13} /></button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {modal && (
+        <Modal title="Log a Purchase" onClose={() => setModal(false)}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <Btn variant={mode === "existing" ? "gold" : "ghost"} onClick={() => setMode("existing")} style={{ flex: 1, justifyContent: "center" }}>Restock existing item</Btn>
+            <Btn variant={mode === "new" ? "gold" : "ghost"} onClick={() => { setMode("new"); setForm({ ...form, itemId: "" }); }} style={{ flex: 1, justifyContent: "center" }}>New / one-off item</Btn>
+          </div>
+
+          {mode === "existing" ? (
+            <Field label="Inventory Item">
+              <select style={inputStyle} value={form.itemId} onChange={(e) => onPickItem(e.target.value)}>
+                <option value="">Select item</option>
+                {inventory.map((i) => <option key={i.id} value={i.id}>{i.name} (currently {i.stock} {i.unit})</option>)}
+              </select>
+            </Field>
+          ) : (
+            <Field label="Item Name"><input style={inputStyle} value={form.itemName} onChange={(e) => setForm({ ...form, itemName: e.target.value })} placeholder="e.g. Disposable cups" /></Field>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <Field label="Quantity"><input type="number" style={inputStyle} value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} /></Field>
+            <Field label="Unit">
+              <select style={inputStyle} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })}>
+                <option>kg</option><option>g</option><option>L</option><option>ml</option><option>pcs</option>
+              </select>
+            </Field>
+          </div>
+          <Field label="Unit Cost (Rs)"><input type="number" style={inputStyle} value={form.unitCost} onChange={(e) => setForm({ ...form, unitCost: e.target.value })} /></Field>
+          <Field label="Supplier"><input style={inputStyle} value={form.supplier} onChange={(e) => setForm({ ...form, supplier: e.target.value })} placeholder="Optional" /></Field>
+          <Field label="Notes"><input style={inputStyle} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Optional" /></Field>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <span style={{ fontSize: 13, color: T.plum }}>Total cost</span>
+            <strong style={{ fontFamily: "inherit", fontSize: 16 }}>{money(totalCost)}</strong>
+          </div>
+          <Btn variant="primary" onClick={save} style={{ width: "100%", justifyContent: "center" }}>Save Purchase</Btn>
         </Modal>
       )}
     </div>
