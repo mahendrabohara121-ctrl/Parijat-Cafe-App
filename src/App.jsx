@@ -40,16 +40,16 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 /* ---------------- seed data ---------------- */
 const SEED_MENU = [
-  { id: uid(), name: "Dusk Pour-Over", category: "Coffee & Brews", price: 320, veg: true, available: true },
-  { id: uid(), name: "Parijat Cardamom Latte", category: "Coffee & Brews", price: 280, veg: true, available: true },
-  { id: uid(), name: "Himalayan Cold Brew", category: "Coffee & Brews", price: 260, veg: true, available: true },
-  { id: uid(), name: "Masala Chiya", category: "Coffee & Brews", price: 150, veg: true, available: true },
-  { id: uid(), name: "Sekuwa Skewers", category: "Small Plates", price: 420, veg: false, available: true },
-  { id: uid(), name: "Momo Trio", category: "Small Plates", price: 380, veg: false, available: true },
-  { id: uid(), name: "Aloo Sadeko Toast", category: "Small Plates", price: 240, veg: true, available: true },
-  { id: uid(), name: "Sel Roti Stack", category: "Sweet", price: 260, veg: true, available: true },
-  { id: uid(), name: "Malai Cheesecake", category: "Sweet", price: 340, veg: true, available: true },
-  { id: uid(), name: "Jasmine Kulfi", category: "Sweet", price: 220, veg: true, available: true },
+  { id: uid(), name: "Dusk Pour-Over", category: "Coffee & Brews", price: 320, veg: true, available: true, station: "bar" },
+  { id: uid(), name: "Parijat Cardamom Latte", category: "Coffee & Brews", price: 280, veg: true, available: true, station: "bar" },
+  { id: uid(), name: "Himalayan Cold Brew", category: "Coffee & Brews", price: 260, veg: true, available: true, station: "bar" },
+  { id: uid(), name: "Masala Chiya", category: "Coffee & Brews", price: 150, veg: true, available: true, station: "bar" },
+  { id: uid(), name: "Sekuwa Skewers", category: "Small Plates", price: 420, veg: false, available: true, station: "kitchen" },
+  { id: uid(), name: "Momo Trio", category: "Small Plates", price: 380, veg: false, available: true, station: "kitchen" },
+  { id: uid(), name: "Aloo Sadeko Toast", category: "Small Plates", price: 240, veg: true, available: true, station: "kitchen" },
+  { id: uid(), name: "Sel Roti Stack", category: "Sweet", price: 260, veg: true, available: true, station: "kitchen" },
+  { id: uid(), name: "Malai Cheesecake", category: "Sweet", price: 340, veg: true, available: true, station: "kitchen" },
+  { id: uid(), name: "Jasmine Kulfi", category: "Sweet", price: 220, veg: true, available: true, station: "bar" },
 ];
 const SEED_TABLES = Array.from({ length: 10 }, (_, i) => ({
   id: uid(), name: "T" + (i + 1), capacity: i % 3 === 0 ? 2 : 4, status: "free", orderId: null,
@@ -91,8 +91,8 @@ const SEED_STAFF = [
 const TABLE_MAP = {
   menu: {
     table: "menu_items",
-    toDb: (m) => ({ id: m.id, name: m.name, category: m.category, price: m.price, veg: m.veg, available: m.available }),
-    fromDb: (r) => ({ id: r.id, name: r.name, category: r.category, price: Number(r.price), veg: r.veg, available: r.available }),
+    toDb: (m) => ({ id: m.id, name: m.name, category: m.category, price: m.price, veg: m.veg, available: m.available, station: m.station || "kitchen" }),
+    fromDb: (r) => ({ id: r.id, name: r.name, category: r.category, price: Number(r.price), veg: r.veg, available: r.available, station: r.station || "kitchen" }),
   },
   tables: {
     table: "dining_tables",
@@ -105,11 +105,13 @@ const TABLE_MAP = {
       id: o.id, table_id: o.tableId || null, table_name: o.tableName, items: o.items, total: o.total,
       status: o.status, source: o.source, customer_name: o.customerName || null,
       payment_method: o.paymentMethod || null, created_at: o.createdAt, paid_at: o.paidAt || null,
+      cancel_reason: o.cancelReason || null, cancelled_from_paid: !!o.cancelledFromPaid,
     }),
     fromDb: (r) => ({
       id: r.id, tableId: r.table_id, tableName: r.table_name, items: r.items, total: Number(r.total),
       status: r.status, source: r.source, customerName: r.customer_name,
       paymentMethod: r.payment_method, createdAt: r.created_at, paidAt: r.paid_at,
+      cancelReason: r.cancel_reason, cancelledFromPaid: r.cancelled_from_paid,
     }),
   },
   inventory: {
@@ -124,8 +126,8 @@ const TABLE_MAP = {
   },
   expenses: {
     table: "expenses",
-    toDb: (e) => ({ id: e.id, category: e.category, description: e.description || null, amount: e.amount, date: e.date }),
-    fromDb: (r) => ({ id: r.id, category: r.category, description: r.description, amount: Number(r.amount), date: r.date }),
+    toDb: (e) => ({ id: e.id, category: e.category, description: e.description || null, amount: e.amount, date: e.date, payment_method: e.paymentMethod || "cash" }),
+    fromDb: (r) => ({ id: r.id, category: r.category, description: r.description, amount: Number(r.amount), date: r.date, paymentMethod: r.payment_method || "cash" }),
   },
   customers: {
     table: "customers",
@@ -142,10 +144,12 @@ const TABLE_MAP = {
     toDb: (p) => ({
       id: p.id, item_id: p.itemId || null, item_name: p.itemName, quantity: p.quantity, unit: p.unit,
       unit_cost: p.unitCost, total_cost: p.totalCost, supplier: p.supplier || null, notes: p.notes || null, date: p.date,
+      payment_method: p.paymentMethod || "cash",
     }),
     fromDb: (r) => ({
       id: r.id, itemId: r.item_id, itemName: r.item_name, quantity: Number(r.quantity), unit: r.unit,
       unitCost: Number(r.unit_cost), totalCost: Number(r.total_cost), supplier: r.supplier, notes: r.notes, date: r.date,
+      paymentMethod: r.payment_method || "cash",
     }),
   },
 };
@@ -483,11 +487,11 @@ export default function App() {
         <div style={{ padding: 24 }}>
           {active === "overview" && <Overview orders={orders} tables={tables} inventory={inventory} expenses={expenses} customers={customers} />}
           {active === "orders" && <Orders menu={menu} tables={tables} orders={orders} setOrders={persist.orders} setTables={persist.tables} customers={customers} setCustomers={persist.customers} />}
-          {active === "kds" && <KDS orders={orders} setOrders={persist.orders} tables={tables} setTables={persist.tables} />}
+          {active === "kds" && <KDS orders={orders} setOrders={persist.orders} tables={tables} setTables={persist.tables} menu={menu} />}
           {active === "tables" && <TablesView tables={tables} setTables={persist.tables} orders={orders} />}
           {active === "purchase" && <PurchaseManagement purchases={purchases} setPurchases={persist.purchases} inventory={inventory} setInventory={persist.inventory} />}
           {active === "inventory" && <Inventory inventory={inventory} setInventory={persist.inventory} waste={waste} setWaste={persist.waste} />}
-          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} />}
+          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} />}
           {active === "menu" && <MenuManagement menu={menu} setMenu={persist.menu} />}
           {active === "crm" && <CRM customers={customers} setCustomers={persist.customers} orders={orders} />}
           {active === "sales" && <SalesReport orders={orders} menu={menu} />}
@@ -635,6 +639,27 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "cancelled" } : o)));
     setTables(tables.map((t) => (t.id === order.tableId ? { ...t, status: "free", orderId: null } : t)));
   };
+  const [voidTarget, setVoidTarget] = useState(null);
+  const [voidReason, setVoidReason] = useState("");
+
+  const openCancel = (order) => {
+    if (order.status === "paid") { setVoidTarget(order); setVoidReason(""); return; } // paid bills need a reason
+    cancelOrder(order); // not-yet-paid orders cancel instantly, same as before
+  };
+
+  const confirmVoid = () => {
+    if (!voidReason.trim()) return;
+    const order = voidTarget;
+    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "cancelled", cancelReason: voidReason.trim(), cancelledFromPaid: true } : o)));
+    // reverse any loyalty points/visit that were credited when it was paid
+    const cust = customers.find((c) => c.name === order.customerName);
+    if (cust) {
+      setCustomers(customers.map((c) => c.id === cust.id
+        ? { ...c, points: Math.max(0, c.points - Math.floor(order.total / 100)), visits: Math.max(0, c.visits - 1) }
+        : c));
+    }
+    setVoidTarget(null);
+  };
 
   const visible = orders.filter((o) => filter === "active" ? !["paid", "cancelled"].includes(o.status) : true).slice().reverse();
   const toneFor = { placed: "warn", preparing: "gold", ready: "good", served: "neutral", paid: "good", cancelled: "bad" };
@@ -648,6 +673,8 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
       Items: o.items.map((it) => `${it.qty}x ${it.name}`).join(", "),
       "Payment Method": PAYMENT_METHODS.find((p) => p.id === o.paymentMethod)?.label || "",
       "Total (Rs)": o.total,
+      "Voided After Payment": o.cancelledFromPaid ? "Yes" : "",
+      "Cancel Reason": o.cancelReason || "",
     }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Orders");
     XLSX.writeFile(wb, `parijat-cafe-orders-${today()}.xlsx`);
@@ -679,16 +706,18 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
                     {o.status === "paid" && o.paymentMethod && (
                       <Pill tone="gold">{PAYMENT_METHODS.find((p) => p.id === o.paymentMethod)?.label || o.paymentMethod}</Pill>
                     )}
+                    {o.status === "cancelled" && o.cancelledFromPaid && <Pill tone="bad">Voided after payment</Pill>}
                   </div>
                   <div style={{ fontSize: 13, color: T.plum }}>
                     {o.items.map((it) => `${it.qty}× ${it.name}`).join(", ")}
                   </div>
+                  {o.cancelReason && <div style={{ fontSize: 12, color: T.red, marginTop: 4 }}>Reason: {o.cancelReason}</div>}
                 </div>
                 <div style={{ textAlign: "right" }}>
                   <div style={{ fontWeight: 700, fontFamily: "inherit", color: T.dusk, marginBottom: 8 }}>{money(o.total)}</div>
                   <div style={{ display: "flex", gap: 6 }}>
                     {nextLabel[o.status] && <Btn variant="gold" onClick={() => advance(o)}>{nextLabel[o.status]}</Btn>}
-                    {!["paid", "cancelled"].includes(o.status) && <Btn variant="danger" onClick={() => cancelOrder(o)}>Cancel</Btn>}
+                    {o.status !== "cancelled" && <Btn variant="danger" onClick={() => openCancel(o)}>{o.status === "paid" ? "Void Bill" : "Cancel"}</Btn>}
                   </div>
                 </div>
               </div>
@@ -745,12 +774,31 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
           </div>
         </Modal>
       )}
+
+      {voidTarget && (
+        <Modal title={`Void Bill · ${voidTarget.tableName} · ${money(voidTarget.total)}`} onClose={() => setVoidTarget(null)} width={420}>
+          <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 14 }}>
+            This bill was already marked Paid. Voiding it removes it from your sales and bank/cash totals, and reverses any loyalty points earned. A reason is required for the record.
+          </div>
+          <Field label="Reason for voiding">
+            <textarea
+              style={{ ...inputStyle, minHeight: 80, resize: "vertical" }}
+              value={voidReason}
+              onChange={(e) => setVoidReason(e.target.value)}
+              placeholder="e.g. Entered wrong table, guest complaint, duplicate bill…"
+              autoFocus
+            />
+          </Field>
+          <Btn variant="danger" onClick={confirmVoid} disabled={!voidReason.trim()} style={{ width: "100%", justifyContent: "center" }}>Confirm Void</Btn>
+        </Modal>
+      )}
     </div>
   );
 }
 
 /* ================= KDS ================= */
-function KDS({ orders, setOrders, tables, setTables }) {
+function KDS({ orders, setOrders, tables, setTables, menu }) {
+  const [station, setStation] = useState("kitchen"); // "kitchen" or "bar"
   const cols = [
     { key: "placed", label: "New", icon: Clock },
     { key: "preparing", label: "Preparing", icon: Flame },
@@ -759,34 +807,59 @@ function KDS({ orders, setOrders, tables, setTables }) {
   const advance = (order, to) => {
     setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: to } : o)));
   };
+
+  const stationOf = (menuId) => menu.find((m) => m.id === menuId)?.station || "kitchen";
+  // only show orders that actually contain at least one item for the selected station,
+  // and within the ticket only list that station's items
+  const relevantItems = (o) => o.items.filter((it) => stationOf(it.menuId) === station);
+  const ordersForStation = (status) => orders.filter((o) => o.status === status && relevantItems(o).length > 0);
+
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px,1fr))", gap: 16 }}>
-      {cols.map((col) => (
-        <div key={col.key}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-            <col.icon size={16} color={T.gold} />
-            <h3 style={{ fontFamily: "inherit", fontSize: 15, color: T.dusk }}>{col.label}</h3>
-            <Pill>{orders.filter((o) => o.status === col.key).length}</Pill>
-          </div>
-          <div style={{ display: "grid", gap: 10 }}>
-            {orders.filter((o) => o.status === col.key).map((o) => (
-              <Card key={o.id} style={{ padding: 14, borderLeft: `4px solid ${T.gold}` }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                  <strong>{o.tableName}</strong>
-                  <span style={{ fontSize: 11, color: T.plum, opacity: 0.6 }}>{new Date(o.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-                </div>
-                <ul style={{ fontSize: 13, color: T.plum, marginBottom: 10, paddingLeft: 16 }}>
-                  {o.items.map((it, i) => <li key={i}>{it.qty}× {it.name}</li>)}
-                </ul>
-                {col.key === "placed" && <Btn variant="gold" onClick={() => advance(o, "preparing")} style={{ width: "100%", justifyContent: "center" }}>Start Preparing</Btn>}
-                {col.key === "preparing" && <Btn variant="gold" onClick={() => advance(o, "ready")} style={{ width: "100%", justifyContent: "center" }}>Mark Ready</Btn>}
-                {col.key === "ready" && <Btn variant="primary" onClick={() => advance(o, "served")} style={{ width: "100%", justifyContent: "center" }}>Mark Served</Btn>}
-              </Card>
-            ))}
-            {orders.filter((o) => o.status === col.key).length === 0 && <div style={{ fontSize: 12.5, color: T.plum, opacity: 0.5, padding: "10px 0" }}>Nothing here.</div>}
-          </div>
-        </div>
-      ))}
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+        <Btn variant={station === "kitchen" ? "gold" : "ghost"} onClick={() => setStation("kitchen")}>Kitchen</Btn>
+        <Btn variant={station === "bar" ? "gold" : "ghost"} onClick={() => setStation("bar")}>Bar & Beverage</Btn>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px,1fr))", gap: 16 }}>
+        {cols.map((col) => {
+          const colOrders = ordersForStation(col.key);
+          return (
+            <div key={col.key}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                <col.icon size={16} color={T.gold} />
+                <h3 style={{ fontFamily: "inherit", fontSize: 15, color: T.dusk }}>{col.label}</h3>
+                <Pill>{colOrders.length}</Pill>
+              </div>
+              <div style={{ display: "grid", gap: 10 }}>
+                {colOrders.map((o) => {
+                  const items = relevantItems(o);
+                  const hasOtherStationItems = o.items.length > items.length;
+                  return (
+                    <Card key={o.id} style={{ padding: 14, borderLeft: `4px solid ${T.gold}` }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                        <strong>{o.tableName}</strong>
+                        <span style={{ fontSize: 11, color: T.plum, opacity: 0.6 }}>{new Date(o.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                      </div>
+                      <ul style={{ fontSize: 13, color: T.plum, marginBottom: 8, paddingLeft: 16 }}>
+                        {items.map((it, i) => <li key={i}>{it.qty}× {it.name}</li>)}
+                      </ul>
+                      {hasOtherStationItems && (
+                        <div style={{ fontSize: 11, color: T.plum, opacity: 0.6, marginBottom: 10 }}>
+                          This order also has items on the {station === "kitchen" ? "Bar" : "Kitchen"} board.
+                        </div>
+                      )}
+                      {col.key === "placed" && <Btn variant="gold" onClick={() => advance(o, "preparing")} style={{ width: "100%", justifyContent: "center" }}>Start Preparing</Btn>}
+                      {col.key === "preparing" && <Btn variant="gold" onClick={() => advance(o, "ready")} style={{ width: "100%", justifyContent: "center" }}>Mark Ready</Btn>}
+                      {col.key === "ready" && <Btn variant="primary" onClick={() => advance(o, "served")} style={{ width: "100%", justifyContent: "center" }}>Mark Served</Btn>}
+                    </Card>
+                  );
+                })}
+                {colOrders.length === 0 && <div style={{ fontSize: 12.5, color: T.plum, opacity: 0.5, padding: "10px 0" }}>Nothing here.</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -973,25 +1046,33 @@ function Inventory({ inventory, setInventory, waste, setWaste }) {
 }
 
 /* ================= ACCOUNTING ================= */
-function Accounting({ expenses, setExpenses, orders }) {
+function Accounting({ expenses, setExpenses, orders, purchases }) {
   const [modal, setModal] = useState(false);
-  const [form, setForm] = useState({ category: "Ingredients", description: "", amount: "" });
+  const [form, setForm] = useState({ category: "Ingredients", description: "", amount: "", paymentMethod: "cash" });
   const revenue = orders.filter((o) => o.status === "paid").reduce((s, o) => s + o.total, 0);
   const totalExpense = expenses.reduce((s, e) => s + Number(e.amount), 0);
-  const profit = revenue - totalExpense;
+  const totalPurchaseSpend = purchases.reduce((s, p) => s + Number(p.totalCost), 0);
+  const profit = revenue - totalExpense - totalPurchaseSpend;
 
   const addExpense = () => {
     if (!form.amount) return;
-    setExpenses([...expenses, { id: uid(), category: form.category, description: form.description, amount: Number(form.amount), date: today() }]);
-    setForm({ category: "Ingredients", description: "", amount: "" }); setModal(false);
+    setExpenses([...expenses, { id: uid(), category: form.category, description: form.description, amount: Number(form.amount), date: today(), paymentMethod: form.paymentMethod }]);
+    setForm({ category: "Ingredients", description: "", amount: "", paymentMethod: "cash" }); setModal(false);
   };
   const removeExpense = (id) => setExpenses(expenses.filter((e) => e.id !== id));
 
   const paidOrders = orders.filter((o) => o.status === "paid");
-  const byMethod = PAYMENT_METHODS.map((p) => ({
-    ...p,
-    total: paidOrders.filter((o) => o.paymentMethod === p.id).reduce((s, o) => s + o.total, 0),
-  })).filter((p) => p.total > 0);
+
+  // full cash/bank reconciliation: money IN from paid orders, money OUT from expenses + purchases, per payment method
+  const methodBreakdown = PAYMENT_METHODS.map((p) => {
+    const moneyIn = paidOrders.filter((o) => o.paymentMethod === p.id).reduce((s, o) => s + o.total, 0);
+    const expenseOut = expenses.filter((e) => e.paymentMethod === p.id).reduce((s, e) => s + Number(e.amount), 0);
+    const purchaseOut = purchases.filter((pu) => pu.paymentMethod === p.id).reduce((s, pu) => s + Number(pu.totalCost), 0);
+    return { ...p, in: moneyIn, out: expenseOut + purchaseOut, net: moneyIn - expenseOut - purchaseOut };
+  }).filter((p) => p.in > 0 || p.out > 0);
+
+  const cashBalance = methodBreakdown.find((p) => p.id === "cash")?.net || 0;
+  const bankBalance = methodBreakdown.filter((p) => p.id !== "cash").reduce((s, p) => s + p.net, 0);
 
   const exportToExcel = () => {
     const wb = XLSX.utils.book_new();
@@ -999,17 +1080,21 @@ function Accounting({ expenses, setExpenses, orders }) {
     const summarySheet = [
       { Metric: "Total Revenue (Rs)", Value: revenue },
       { Metric: "Total Expenses (Rs)", Value: totalExpense },
+      { Metric: "Total Purchases (Rs)", Value: totalPurchaseSpend },
       { Metric: "Net Profit (Rs)", Value: profit },
+      { Metric: "Cash in Hand (Rs)", Value: cashBalance },
+      { Metric: "Bank Balance (Rs)", Value: bankBalance },
     ];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summarySheet), "Summary");
 
-    if (byMethod.length > 0) {
-      const methodSheet = byMethod.map((p) => ({ "Payment Method": p.label, "Revenue (Rs)": p.total }));
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(methodSheet), "By Payment Method");
+    if (methodBreakdown.length > 0) {
+      const methodSheet = methodBreakdown.map((p) => ({ "Payment Method": p.label, "Money In (Rs)": p.in, "Money Out (Rs)": p.out, "Net (Rs)": p.net }));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(methodSheet), "Cash & Bank Reconciliation");
     }
 
     const expenseSheet = expenses.map((e) => ({
       Date: e.date, Category: e.category, Description: e.description, "Amount (Rs)": e.amount,
+      "Paid Via": PAYMENT_METHODS.find((p) => p.id === e.paymentMethod)?.label || e.paymentMethod,
     }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(expenseSheet), "Expenses");
 
@@ -1024,22 +1109,41 @@ function Accounting({ expenses, setExpenses, orders }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 14, marginBottom: 20 }}>
         <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Revenue</div><div style={{ fontSize: 22, fontWeight: 700, color: "#15803D", fontFamily: "inherit" }}>{money(revenue)}</div></Card>
         <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Expenses</div><div style={{ fontSize: 22, fontWeight: 700, color: T.red, fontFamily: "inherit" }}>{money(totalExpense)}</div></Card>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Purchases</div><div style={{ fontSize: 22, fontWeight: 700, color: T.red, fontFamily: "inherit" }}>{money(totalPurchaseSpend)}</div></Card>
         <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Net Profit</div><div style={{ fontSize: 22, fontWeight: 700, color: T.dusk, fontFamily: "inherit" }}>{money(profit)}</div></Card>
       </div>
 
-      {byMethod.length > 0 && (
-        <Card style={{ padding: 18, marginBottom: 20 }}>
-          <h3 style={{ fontSize: 15, color: T.dusk, marginBottom: 12 }}>Revenue by Payment Method</h3>
-          <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
-            {byMethod.map((p) => (
-              <div key={p.id}>
-                <div style={{ fontSize: 11, color: T.plum, opacity: 0.7, textTransform: "uppercase", letterSpacing: 0.4 }}>{p.label}</div>
-                <div style={{ fontSize: 17, fontWeight: 700, color: T.dusk }}>{money(p.total)}</div>
-              </div>
-            ))}
+      <Card style={{ padding: 18, marginBottom: 20 }}>
+        <h3 style={{ fontSize: 15, color: T.dusk, marginBottom: 4 }}>Cash & Bank Reconciliation</h3>
+        <div style={{ fontSize: 12, color: T.plum, opacity: 0.7, marginBottom: 16 }}>Cash sales minus cash spending vs. everything paid through card/FonePay/eSewa/Khalti/bank transfer.</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 14, marginBottom: 18 }}>
+          <div style={{ background: T.cream, borderRadius: 8, padding: 14 }}>
+            <div style={{ fontSize: 11, color: T.plum, opacity: 0.7, textTransform: "uppercase", letterSpacing: 0.4 }}>Cash in Hand</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: T.dusk }}>{money(cashBalance)}</div>
           </div>
-        </Card>
-      )}
+          <div style={{ background: T.cream, borderRadius: 8, padding: 14 }}>
+            <div style={{ fontSize: 11, color: T.plum, opacity: 0.7, textTransform: "uppercase", letterSpacing: 0.4 }}>Bank Balance</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: T.dusk }}>{money(bankBalance)}</div>
+          </div>
+        </div>
+        {methodBreakdown.length > 0 && (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead><tr style={{ textAlign: "left", color: T.plum, opacity: 0.65, fontSize: 11, textTransform: "uppercase" }}>
+              <th style={{ padding: "6px 4px" }}>Method</th><th>In</th><th>Out</th><th>Net</th>
+            </tr></thead>
+            <tbody>
+              {methodBreakdown.map((p) => (
+                <tr key={p.id} style={{ borderTop: `1px solid ${T.line}` }}>
+                  <td style={{ padding: "8px 4px" }}>{p.label}</td>
+                  <td style={{ color: "#15803D" }}>{money(p.in)}</td>
+                  <td style={{ color: T.red }}>{money(p.out)}</td>
+                  <td style={{ fontWeight: 600 }}>{money(p.net)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <h3 style={{ fontFamily: "inherit", fontSize: 16, color: T.dusk }}>Expenses</h3>
@@ -1048,13 +1152,14 @@ function Accounting({ expenses, setExpenses, orders }) {
       <Card style={{ padding: 0, overflow: "hidden" }}>
         {expenses.length === 0 ? <Empty text="No expenses recorded yet." /> : (
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
-            <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}><th style={{ padding: "10px 14px" }}>Category</th><th>Description</th><th>Amount</th><th>Date</th><th></th></tr></thead>
+            <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}><th style={{ padding: "10px 14px" }}>Category</th><th>Description</th><th>Amount</th><th>Paid Via</th><th>Date</th><th></th></tr></thead>
             <tbody>
               {expenses.slice().reverse().map((e) => (
                 <tr key={e.id} style={{ borderTop: `1px solid ${T.line}` }}>
                   <td style={{ padding: "10px 14px" }}><Pill>{e.category}</Pill></td>
                   <td>{e.description || "—"}</td>
                   <td>{money(e.amount)}</td>
+                  <td>{PAYMENT_METHODS.find((p) => p.id === e.paymentMethod)?.label || "Cash"}</td>
                   <td style={{ opacity: 0.7 }}>{e.date}</td>
                   <td><button onClick={() => removeExpense(e.id)} style={{ background: "none", border: "none", cursor: "pointer", color: T.plum, opacity: 0.5 }}><Trash2 size={13} /></button></td>
                 </tr>
@@ -1072,6 +1177,11 @@ function Accounting({ expenses, setExpenses, orders }) {
           </Field>
           <Field label="Description"><input style={inputStyle} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
           <Field label="Amount (Rs)"><input type="number" style={inputStyle} value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></Field>
+          <Field label="Paid Via">
+            <select style={inputStyle} value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}>
+              {PAYMENT_METHODS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
+          </Field>
           <Btn variant="primary" onClick={addExpense} style={{ width: "100%", justifyContent: "center" }}>Add Expense</Btn>
         </Modal>
       )}
@@ -1083,10 +1193,10 @@ function Accounting({ expenses, setExpenses, orders }) {
 function MenuManagement({ menu, setMenu }) {
   const [modal, setModal] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ name: "", category: "Coffee & Brews", price: "", veg: true });
+  const [form, setForm] = useState({ name: "", category: "Coffee & Brews", price: "", veg: true, station: "kitchen" });
 
-  const openNew = () => { setEditing(null); setForm({ name: "", category: "Coffee & Brews", price: "", veg: true }); setModal(true); };
-  const openEdit = (m) => { setEditing(m.id); setForm(m); setModal(true); };
+  const openNew = () => { setEditing(null); setForm({ name: "", category: "Coffee & Brews", price: "", veg: true, station: "kitchen" }); setModal(true); };
+  const openEdit = (m) => { setEditing(m.id); setForm({ ...m, station: m.station || "kitchen" }); setModal(true); };
   const save = () => {
     if (!form.name || !form.price) return;
     if (editing) setMenu(menu.map((m) => m.id === editing ? { ...m, ...form, price: Number(form.price) } : m));
@@ -1100,7 +1210,7 @@ function MenuManagement({ menu, setMenu }) {
 
   const exportToExcel = () => {
     const wb = XLSX.utils.book_new();
-    const sheet = menu.map((m) => ({ Name: m.name, Category: m.category, "Price (Rs)": m.price, Type: m.veg ? "Veg" : "Non-Veg", Available: m.available ? "Yes" : "No" }));
+    const sheet = menu.map((m) => ({ Name: m.name, Category: m.category, "Price (Rs)": m.price, Type: m.veg ? "Veg" : "Non-Veg", Station: m.station === "bar" ? "Bar & Beverage" : "Kitchen", Available: m.available ? "Yes" : "No" }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Menu");
     XLSX.writeFile(wb, `parijat-cafe-menu-${today()}.xlsx`);
   };
@@ -1122,7 +1232,10 @@ function MenuManagement({ menu, setMenu }) {
                     <div style={{ fontWeight: 600, fontSize: 14 }}>{m.name}</div>
                     <div style={{ fontSize: 12.5, color: T.gold, marginTop: 2 }}>{money(m.price)}</div>
                   </div>
-                  <Pill tone={m.veg ? "good" : "bad"}>{m.veg ? "Veg" : "Non-Veg"}</Pill>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end" }}>
+                    <Pill tone={m.veg ? "good" : "bad"}>{m.veg ? "Veg" : "Non-Veg"}</Pill>
+                    <Pill tone={m.station === "bar" ? "gold" : "neutral"}>{m.station === "bar" ? "Bar" : "Kitchen"}</Pill>
+                  </div>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
                   <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
@@ -1146,6 +1259,12 @@ function MenuManagement({ menu, setMenu }) {
           <Field label="Type">
             <select style={inputStyle} value={form.veg ? "veg" : "nonveg"} onChange={(e) => setForm({ ...form, veg: e.target.value === "veg" })}>
               <option value="veg">Veg</option><option value="nonveg">Non-Veg</option>
+            </select>
+          </Field>
+          <Field label="Prepared At">
+            <select style={inputStyle} value={form.station} onChange={(e) => setForm({ ...form, station: e.target.value })}>
+              <option value="kitchen">Kitchen</option>
+              <option value="bar">Bar & Beverage</option>
             </select>
           </Field>
           <Btn variant="primary" onClick={save} style={{ width: "100%", justifyContent: "center" }}>{editing ? "Save Changes" : "Add Item"}</Btn>
@@ -1652,11 +1771,11 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
 /* ================= PURCHASE MANAGEMENT ================= */
 function PurchaseManagement({ purchases, setPurchases, inventory, setInventory }) {
   const [modal, setModal] = useState(false);
-  const [form, setForm] = useState({ itemId: "", itemName: "", quantity: "", unit: "kg", unitCost: "", supplier: "", notes: "" });
+  const [form, setForm] = useState({ itemId: "", itemName: "", quantity: "", unit: "kg", unitCost: "", supplier: "", notes: "", paymentMethod: "cash" });
   const [mode, setMode] = useState("existing"); // "existing" inventory item, or "new" one-off item
 
   const openNew = () => {
-    setForm({ itemId: "", itemName: "", quantity: "", unit: "kg", unitCost: "", supplier: "", notes: "" });
+    setForm({ itemId: "", itemName: "", quantity: "", unit: "kg", unitCost: "", supplier: "", notes: "", paymentMethod: "cash" });
     setMode("existing");
     setModal(true);
   };
@@ -1681,6 +1800,7 @@ function PurchaseManagement({ purchases, setPurchases, inventory, setInventory }
       supplier: form.supplier,
       notes: form.notes,
       date: today(),
+      paymentMethod: form.paymentMethod,
     };
     setPurchases([...purchases, entry]);
 
@@ -1700,7 +1820,8 @@ function PurchaseManagement({ purchases, setPurchases, inventory, setInventory }
     const wb = XLSX.utils.book_new();
     const sheet = purchases.map((p) => ({
       Date: p.date, Item: p.itemName, Quantity: p.quantity, Unit: p.unit,
-      "Unit Cost (Rs)": p.unitCost, "Total Cost (Rs)": p.totalCost, Supplier: p.supplier, Notes: p.notes,
+      "Unit Cost (Rs)": p.unitCost, "Total Cost (Rs)": p.totalCost, Supplier: p.supplier,
+      "Paid Via": PAYMENT_METHODS.find((pm) => pm.id === p.paymentMethod)?.label || "Cash", Notes: p.notes,
     }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Purchases");
     XLSX.writeFile(wb, `parijat-cafe-purchases-${today()}.xlsx`);
@@ -1723,7 +1844,7 @@ function PurchaseManagement({ purchases, setPurchases, inventory, setInventory }
         {purchases.length === 0 ? <Empty text="No purchases logged yet. Log a restock to track supplier spend." /> : (
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
             <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}>
-              <th style={{ padding: "10px 14px" }}>Date</th><th>Item</th><th>Qty</th><th>Unit Cost</th><th>Total</th><th>Supplier</th><th></th>
+              <th style={{ padding: "10px 14px" }}>Date</th><th>Item</th><th>Qty</th><th>Unit Cost</th><th>Total</th><th>Paid Via</th><th>Supplier</th><th></th>
             </tr></thead>
             <tbody>
               {purchases.slice().reverse().map((p) => (
@@ -1733,6 +1854,7 @@ function PurchaseManagement({ purchases, setPurchases, inventory, setInventory }
                   <td>{p.quantity} {p.unit}</td>
                   <td>{money(p.unitCost)}</td>
                   <td>{money(p.totalCost)}</td>
+                  <td>{PAYMENT_METHODS.find((pm) => pm.id === p.paymentMethod)?.label || "Cash"}</td>
                   <td>{p.supplier || "—"}</td>
                   <td><button onClick={() => remove(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: T.plum, opacity: 0.5 }}><Trash2 size={13} /></button></td>
                 </tr>
@@ -1769,6 +1891,11 @@ function PurchaseManagement({ purchases, setPurchases, inventory, setInventory }
             </Field>
           </div>
           <Field label="Unit Cost (Rs)"><input type="number" style={inputStyle} value={form.unitCost} onChange={(e) => setForm({ ...form, unitCost: e.target.value })} /></Field>
+          <Field label="Paid Via">
+            <select style={inputStyle} value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}>
+              {PAYMENT_METHODS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
+          </Field>
           <Field label="Supplier"><input style={inputStyle} value={form.supplier} onChange={(e) => setForm({ ...form, supplier: e.target.value })} placeholder="Optional" /></Field>
           <Field label="Notes"><input style={inputStyle} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Optional" /></Field>
 
