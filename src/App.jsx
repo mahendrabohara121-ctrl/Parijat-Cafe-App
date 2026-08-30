@@ -106,12 +106,14 @@ const TABLE_MAP = {
       status: o.status, source: o.source, customer_name: o.customerName || null,
       payment_method: o.paymentMethod || null, created_at: o.createdAt, paid_at: o.paidAt || null,
       cancel_reason: o.cancelReason || null, cancelled_from_paid: !!o.cancelledFromPaid,
+      subtotal: o.subtotal != null ? o.subtotal : o.total, discount: o.discount || 0,
     }),
     fromDb: (r) => ({
       id: r.id, tableId: r.table_id, tableName: r.table_name, items: r.items, total: Number(r.total),
       status: r.status, source: r.source, customerName: r.customer_name,
       paymentMethod: r.payment_method, createdAt: r.created_at, paidAt: r.paid_at,
       cancelReason: r.cancel_reason, cancelledFromPaid: r.cancelled_from_paid,
+      subtotal: r.subtotal != null ? Number(r.subtotal) : Number(r.total), discount: Number(r.discount || 0),
     }),
   },
   inventory: {
@@ -597,6 +599,11 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
   const [cart, setCart] = useState({});
   const [filter, setFilter] = useState("active");
   const [payOrder, setPayOrder] = useState(null); // order pending payment-method selection
+  const [addItemTarget, setAddItemTarget] = useState(null); // existing order we're adding more items to
+  const [addCart, setAddCart] = useState({});
+  const [discountTarget, setDiscountTarget] = useState(null); // order being discounted
+  const [discountType, setDiscountType] = useState("flat"); // "flat" (Rs) or "percent" (%)
+  const [discountValue, setDiscountValue] = useState("");
 
   const addToCart = (item) => setCart((c) => ({ ...c, [item.id]: (c[item.id] || 0) + 1 }));
   const removeFromCart = (item) => setCart((c) => {
@@ -611,10 +618,49 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
       const m = menu.find((mm) => mm.id === id);
       return { menuId: id, name: m.name, qty, price: m.price };
     });
-    const order = { id: uid(), tableId, tableName: table.name, items, total: cartTotal, status: "placed", createdAt: new Date().toISOString(), source: "dine-in" };
+    const order = { id: uid(), tableId, tableName: table.name, items, subtotal: cartTotal, discount: 0, total: cartTotal, status: "placed", createdAt: new Date().toISOString(), source: "dine-in" };
     setOrders([...orders, order]);
     setTables(tables.map((t) => (t.id === tableId ? { ...t, status: "occupied", orderId: order.id } : t)));
     setCart({}); setTableId(""); setModal(false);
+  };
+
+  // --- Add Item to an in-progress table (e.g. guest orders dessert after mains) ---
+  const openAddItem = (order) => { setAddItemTarget(order); setAddCart({}); };
+  const addToAddCart = (item) => setAddCart((c) => ({ ...c, [item.id]: (c[item.id] || 0) + 1 }));
+  const removeFromAddCart = (item) => setAddCart((c) => {
+    const n = { ...c }; if (n[item.id] > 1) n[item.id]--; else delete n[item.id]; return n;
+  });
+  const addCartTotal = Object.entries(addCart).reduce((s, [id, qty]) => s + qty * (menu.find((m) => m.id === id)?.price || 0), 0);
+
+  const confirmAddItems = () => {
+    if (!addItemTarget || Object.keys(addCart).length === 0) return;
+    const order = addItemTarget;
+    const mergedItems = [...order.items];
+    Object.entries(addCart).forEach(([id, qty]) => {
+      const m = menu.find((mm) => mm.id === id);
+      const existing = mergedItems.find((it) => it.menuId === id);
+      if (existing) existing.qty += qty;
+      else mergedItems.push({ menuId: id, name: m.name, qty, price: m.price });
+    });
+    const newSubtotal = mergedItems.reduce((s, it) => s + it.qty * it.price, 0);
+    const newTotal = Math.max(0, newSubtotal - (order.discount || 0));
+    setOrders(orders.map((o) => (o.id === order.id
+      ? { ...o, items: mergedItems, subtotal: newSubtotal, total: newTotal, status: "placed" } // back to "placed" so kitchen/bar sees the new item
+      : o)));
+    setAddItemTarget(null); setAddCart({});
+  };
+
+  // --- Discount ---
+  const openDiscount = (order) => { setDiscountTarget(order); setDiscountType("flat"); setDiscountValue(order.discount ? String(order.discount) : ""); };
+  const confirmDiscount = () => {
+    const order = discountTarget;
+    const subtotal = order.subtotal != null ? order.subtotal : order.total;
+    let discountAmt = Number(discountValue) || 0;
+    if (discountType === "percent") discountAmt = Math.round(subtotal * (discountAmt / 100));
+    discountAmt = Math.min(Math.max(0, discountAmt), subtotal); // clamp between 0 and subtotal
+    const newTotal = subtotal - discountAmt;
+    setOrders(orders.map((o) => (o.id === order.id ? { ...o, subtotal, discount: discountAmt, total: newTotal } : o)));
+    setDiscountTarget(null);
   };
 
   const advance = (order) => {
@@ -672,6 +718,8 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
       Table: o.tableName, Source: o.source, Status: o.status,
       Items: o.items.map((it) => `${it.qty}x ${it.name}`).join(", "),
       "Payment Method": PAYMENT_METHODS.find((p) => p.id === o.paymentMethod)?.label || "",
+      "Subtotal (Rs)": o.subtotal != null ? o.subtotal : o.total,
+      "Discount (Rs)": o.discount || 0,
       "Total (Rs)": o.total,
       "Voided After Payment": o.cancelledFromPaid ? "Yes" : "",
       "Cancel Reason": o.cancelReason || "",
@@ -707,15 +755,23 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
                       <Pill tone="gold">{PAYMENT_METHODS.find((p) => p.id === o.paymentMethod)?.label || o.paymentMethod}</Pill>
                     )}
                     {o.status === "cancelled" && o.cancelledFromPaid && <Pill tone="bad">Voided after payment</Pill>}
+                    {o.discount > 0 && <Pill tone="good">Discount applied</Pill>}
                   </div>
                   <div style={{ fontSize: 13, color: T.plum }}>
                     {o.items.map((it) => `${it.qty}× ${it.name}`).join(", ")}
                   </div>
+                  {o.discount > 0 && (
+                    <div style={{ fontSize: 12, color: T.plum, opacity: 0.75, marginTop: 4 }}>
+                      Subtotal {money(o.subtotal != null ? o.subtotal : o.total)} · Discount −{money(o.discount)}
+                    </div>
+                  )}
                   {o.cancelReason && <div style={{ fontSize: 12, color: T.red, marginTop: 4 }}>Reason: {o.cancelReason}</div>}
                 </div>
                 <div style={{ textAlign: "right" }}>
                   <div style={{ fontWeight: 700, fontFamily: "inherit", color: T.dusk, marginBottom: 8 }}>{money(o.total)}</div>
-                  <div style={{ display: "flex", gap: 6 }}>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    {!["paid", "cancelled"].includes(o.status) && <Btn variant="ghost" onClick={() => openAddItem(o)}><Plus size={14} /> Add Item</Btn>}
+                    {!["paid", "cancelled"].includes(o.status) && <Btn variant="ghost" onClick={() => openDiscount(o)}>Discount</Btn>}
                     {nextLabel[o.status] && <Btn variant="gold" onClick={() => advance(o)}>{nextLabel[o.status]}</Btn>}
                     {o.status !== "cancelled" && <Btn variant="danger" onClick={() => openCancel(o)}>{o.status === "paid" ? "Void Bill" : "Cancel"}</Btn>}
                   </div>
@@ -790,6 +846,46 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
             />
           </Field>
           <Btn variant="danger" onClick={confirmVoid} disabled={!voidReason.trim()} style={{ width: "100%", justifyContent: "center" }}>Confirm Void</Btn>
+        </Modal>
+      )}
+
+      {addItemTarget && (
+        <Modal title={`Add Item · ${addItemTarget.tableName}`} onClose={() => setAddItemTarget(null)} width={520}>
+          <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 12 }}>
+            These get added to the same bill. The ticket will reappear on Kitchen/Bar Display so the new item gets prepared.
+          </div>
+          <div style={{ maxHeight: 260, overflowY: "auto", border: `1px solid ${T.line}`, borderRadius: 8, marginBottom: 14 }}>
+            {menu.filter((m) => m.available).map((m) => (
+              <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderBottom: `1px solid ${T.line}` }}>
+                <div><div style={{ fontSize: 13.5, fontWeight: 600 }}>{m.name}</div><div style={{ fontSize: 11.5, color: T.plum, opacity: 0.7 }}>{money(m.price)}</div></div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <button onClick={() => removeFromAddCart(m)} style={{ border: `1px solid ${T.line}`, background: "#fff", borderRadius: 6, width: 24, height: 24, cursor: "pointer" }}>–</button>
+                  <span style={{ minWidth: 14, textAlign: "center", fontSize: 13 }}>{addCart[m.id] || 0}</span>
+                  <button onClick={() => addToAddCart(m)} style={{ border: "none", background: T.dusk, color: "#fff", borderRadius: 6, width: 24, height: 24, cursor: "pointer" }}>+</button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <strong style={{ fontFamily: "inherit", fontSize: 16 }}>Adding: {money(addCartTotal)}</strong>
+            <Btn variant="primary" onClick={confirmAddItems} disabled={addCartTotal === 0}>Add to Bill</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {discountTarget && (
+        <Modal title={`Discount · ${discountTarget.tableName}`} onClose={() => setDiscountTarget(null)} width={380}>
+          <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 14 }}>
+            Subtotal: {money(discountTarget.subtotal != null ? discountTarget.subtotal : discountTarget.total)}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <Btn variant={discountType === "flat" ? "gold" : "ghost"} onClick={() => setDiscountType("flat")} style={{ flex: 1, justifyContent: "center" }}>Flat Rs</Btn>
+            <Btn variant={discountType === "percent" ? "gold" : "ghost"} onClick={() => setDiscountType("percent")} style={{ flex: 1, justifyContent: "center" }}>Percentage %</Btn>
+          </div>
+          <Field label={discountType === "flat" ? "Discount Amount (Rs)" : "Discount (%)"}>
+            <input type="number" style={inputStyle} value={discountValue} onChange={(e) => setDiscountValue(e.target.value)} autoFocus />
+          </Field>
+          <Btn variant="primary" onClick={confirmDiscount} style={{ width: "100%", justifyContent: "center" }}>Apply Discount</Btn>
         </Modal>
       )}
     </div>
