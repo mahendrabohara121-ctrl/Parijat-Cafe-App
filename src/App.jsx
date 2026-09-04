@@ -154,6 +154,11 @@ const TABLE_MAP = {
       paymentMethod: r.payment_method || "cash",
     }),
   },
+  cashDeposits: {
+    table: "cash_deposits",
+    toDb: (d) => ({ id: d.id, amount: d.amount, notes: d.notes || null, date: d.date }),
+    fromDb: (r) => ({ id: r.id, amount: Number(r.amount), notes: r.notes, date: r.date }),
+  },
 };
 
 // fetch a whole table fresh from Supabase, mapped to the app's JS shape
@@ -303,6 +308,7 @@ export default function App() {
   const [customers, setCustomers] = useState([]);
   const [referrals, setReferrals] = useState([]);
   const [purchases, setPurchases] = useState([]);
+  const [cashDeposits, setCashDeposits] = useState([]);
   const [staff, setStaff] = useState([]);
 
   useEffect(() => {
@@ -315,7 +321,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const [m, t, o, inv, w, exp, cust, ref, purch] = await Promise.all([
+      const [m, t, o, inv, w, exp, cust, ref, purch, deposits] = await Promise.all([
         fetchTable("menu"),
         fetchTable("tables"),
         fetchTable("orders"),
@@ -325,6 +331,7 @@ export default function App() {
         fetchTable("customers"),
         fetchTable("referrals"),
         fetchTable("purchases"),
+        fetchTable("cashDeposits"),
       ]);
       // seed empty tables on very first run so the app isn't blank
       setMenu(m.length ? m : SEED_MENU);
@@ -336,6 +343,7 @@ export default function App() {
       setCustomers(cust.length ? cust : SEED_CUSTOMERS);
       setReferrals(ref);
       setPurchases(purch);
+      setCashDeposits(deposits);
       if (!m.length) syncTable("menu", [], SEED_MENU);
       if (!t.length) syncTable("tables", [], SEED_TABLES);
       if (!inv.length) syncTable("inventory", [], SEED_INVENTORY);
@@ -373,6 +381,7 @@ export default function App() {
     customers: (v) => { const prev = customers; setCustomers(v); syncTable("customers", prev, v); },
     referrals: (v) => { const prev = referrals; setReferrals(v); syncTable("referrals", prev, v); },
     purchases: (v) => { const prev = purchases; setPurchases(v); syncTable("purchases", prev, v); },
+    cashDeposits: (v) => { const prev = cashDeposits; setCashDeposits(v); syncTable("cashDeposits", prev, v); },
     refreshStaff: async () => {
       const { data } = await supabase.rpc("list_staff");
       setStaff(data || []);
@@ -484,7 +493,10 @@ export default function App() {
             <button onClick={() => setSidebarOpen(true)} className="parijat-hamburger" style={{ background: "none", border: "none", cursor: "pointer", color: T.dusk, display: "none" }}><MenuIcon size={20} /></button>
             <h2 style={{ fontFamily: "inherit", fontSize: 20, fontWeight: 600, color: T.dusk }}>{activeLabel}</h2>
           </div>
-          <Pill tone="good">● Live</Pill>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <LiveClock />
+            <Pill tone="good">● Live</Pill>
+          </div>
         </div>
         <div style={{ padding: 24 }}>
           {active === "overview" && <Overview orders={orders} tables={tables} inventory={inventory} expenses={expenses} customers={customers} />}
@@ -493,7 +505,7 @@ export default function App() {
           {active === "tables" && <TablesView tables={tables} setTables={persist.tables} orders={orders} />}
           {active === "purchase" && <PurchaseManagement purchases={purchases} setPurchases={persist.purchases} inventory={inventory} setInventory={persist.inventory} />}
           {active === "inventory" && <Inventory inventory={inventory} setInventory={persist.inventory} waste={waste} setWaste={persist.waste} />}
-          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} />}
+          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} cashDeposits={cashDeposits} setCashDeposits={persist.cashDeposits} />}
           {active === "menu" && <MenuManagement menu={menu} setMenu={persist.menu} />}
           {active === "crm" && <CRM customers={customers} setCustomers={persist.customers} orders={orders} />}
           {active === "sales" && <SalesReport orders={orders} menu={menu} />}
@@ -559,6 +571,21 @@ function Overview({ orders, tables, inventory, expenses, customers }) {
 function Empty({ text }) {
   return <div style={{ padding: "26px 0", textAlign: "center", color: T.plum, opacity: 0.6, fontSize: 13.5 }}>{text}</div>;
 }
+function LiveClock() {
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000 * 30); // refresh every 30s, no need for per-second ticking
+    return () => clearInterval(t);
+  }, []);
+  const dateStr = now.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  const timeStr = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return (
+    <div style={{ fontSize: 12.5, color: T.plum, display: "flex", alignItems: "center", gap: 6 }}>
+      <Clock size={13} />
+      <span>{dateStr} · {timeStr}</span>
+    </div>
+  );
+}
 function OrderTable({ rows }) {
   const toneFor = { placed: "warn", preparing: "gold", ready: "good", served: "neutral", paid: "good", cancelled: "bad" };
   return (
@@ -597,10 +624,12 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
   const [modal, setModal] = useState(false);
   const [tableId, setTableId] = useState("");
   const [cart, setCart] = useState({});
+  const [itemSearch, setItemSearch] = useState("");
   const [filter, setFilter] = useState("active");
   const [payOrder, setPayOrder] = useState(null); // order pending payment-method selection
   const [addItemTarget, setAddItemTarget] = useState(null); // existing order we're adding more items to
   const [addCart, setAddCart] = useState({});
+  const [addItemSearch, setAddItemSearch] = useState("");
   const [discountTarget, setDiscountTarget] = useState(null); // order being discounted
   const [discountType, setDiscountType] = useState("flat"); // "flat" (Rs) or "percent" (%)
   const [discountValue, setDiscountValue] = useState("");
@@ -621,11 +650,11 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     const order = { id: uid(), tableId, tableName: table.name, items, subtotal: cartTotal, discount: 0, total: cartTotal, status: "placed", createdAt: new Date().toISOString(), source: "dine-in" };
     setOrders([...orders, order]);
     setTables(tables.map((t) => (t.id === tableId ? { ...t, status: "occupied", orderId: order.id } : t)));
-    setCart({}); setTableId(""); setModal(false);
+    setCart({}); setTableId(""); setItemSearch(""); setModal(false);
   };
 
   // --- Add Item to an in-progress table (e.g. guest orders dessert after mains) ---
-  const openAddItem = (order) => { setAddItemTarget(order); setAddCart({}); };
+  const openAddItem = (order) => { setAddItemTarget(order); setAddCart({}); setAddItemSearch(""); };
   const addToAddCart = (item) => setAddCart((c) => ({ ...c, [item.id]: (c[item.id] || 0) + 1 }));
   const removeFromAddCart = (item) => setAddCart((c) => {
     const n = { ...c }; if (n[item.id] > 1) n[item.id]--; else delete n[item.id]; return n;
@@ -634,12 +663,13 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
 
   const confirmAddItems = () => {
     if (!addItemTarget || Object.keys(addCart).length === 0) return;
-    const order = addItemTarget;
-    const mergedItems = [...order.items];
+    // pull the freshest copy in case state moved on while the modal was open, and never mutate existing item objects
+    const order = orders.find((o) => o.id === addItemTarget.id) || addItemTarget;
+    const mergedItems = order.items.map((it) => ({ ...it })); // clone each item so we never mutate state in place
     Object.entries(addCart).forEach(([id, qty]) => {
       const m = menu.find((mm) => mm.id === id);
-      const existing = mergedItems.find((it) => it.menuId === id);
-      if (existing) existing.qty += qty;
+      const idx = mergedItems.findIndex((it) => it.menuId === id);
+      if (idx >= 0) mergedItems[idx] = { ...mergedItems[idx], qty: mergedItems[idx].qty + qty };
       else mergedItems.push({ menuId: id, name: m.name, qty, price: m.price });
     });
     const newSubtotal = mergedItems.reduce((s, it) => s + it.qty * it.price, 0);
@@ -647,7 +677,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     setOrders(orders.map((o) => (o.id === order.id
       ? { ...o, items: mergedItems, subtotal: newSubtotal, total: newTotal, status: "placed" } // back to "placed" so kitchen/bar sees the new item
       : o)));
-    setAddItemTarget(null); setAddCart({});
+    setAddItemTarget(null); setAddCart({}); setAddItemSearch("");
   };
 
   // --- Discount ---
@@ -790,8 +820,12 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
               {tables.filter((t) => t.status === "free").map((t) => <option key={t.id} value={t.id}>{t.name} (seats {t.capacity})</option>)}
             </select>
           </Field>
+          <div style={{ position: "relative", marginBottom: 10 }}>
+            <Search size={14} style={{ position: "absolute", left: 10, top: 10, color: T.plum, opacity: 0.5 }} />
+            <input style={{ ...inputStyle, paddingLeft: 30 }} placeholder="Search menu…" value={itemSearch} onChange={(e) => setItemSearch(e.target.value)} />
+          </div>
           <div style={{ maxHeight: 260, overflowY: "auto", border: `1px solid ${T.line}`, borderRadius: 8, marginBottom: 14 }}>
-            {menu.filter((m) => m.available).map((m) => (
+            {menu.filter((m) => m.available && m.name.toLowerCase().includes(itemSearch.toLowerCase())).map((m) => (
               <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderBottom: `1px solid ${T.line}` }}>
                 <div><div style={{ fontSize: 13.5, fontWeight: 600 }}>{m.name}</div><div style={{ fontSize: 11.5, color: T.plum, opacity: 0.7 }}>{money(m.price)}</div></div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -854,8 +888,12 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
           <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 12 }}>
             These get added to the same bill. The ticket will reappear on Kitchen/Bar Display so the new item gets prepared.
           </div>
+          <div style={{ position: "relative", marginBottom: 10 }}>
+            <Search size={14} style={{ position: "absolute", left: 10, top: 10, color: T.plum, opacity: 0.5 }} />
+            <input style={{ ...inputStyle, paddingLeft: 30 }} placeholder="Search menu…" value={addItemSearch} onChange={(e) => setAddItemSearch(e.target.value)} autoFocus />
+          </div>
           <div style={{ maxHeight: 260, overflowY: "auto", border: `1px solid ${T.line}`, borderRadius: 8, marginBottom: 14 }}>
-            {menu.filter((m) => m.available).map((m) => (
+            {menu.filter((m) => m.available && m.name.toLowerCase().includes(addItemSearch.toLowerCase())).map((m) => (
               <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderBottom: `1px solid ${T.line}` }}>
                 <div><div style={{ fontSize: 13.5, fontWeight: 600 }}>{m.name}</div><div style={{ fontSize: 11.5, color: T.plum, opacity: 0.7 }}>{money(m.price)}</div></div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1142,13 +1180,18 @@ function Inventory({ inventory, setInventory, waste, setWaste }) {
 }
 
 /* ================= ACCOUNTING ================= */
-function Accounting({ expenses, setExpenses, orders, purchases }) {
+function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, setCashDeposits }) {
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState({ category: "Ingredients", description: "", amount: "", paymentMethod: "cash" });
+  const [depositModal, setDepositModal] = useState(false);
+  const [depositAmount, setDepositAmount] = useState("");
+  const [depositNotes, setDepositNotes] = useState("");
+
   const revenue = orders.filter((o) => o.status === "paid").reduce((s, o) => s + o.total, 0);
   const totalExpense = expenses.reduce((s, e) => s + Number(e.amount), 0);
   const totalPurchaseSpend = purchases.reduce((s, p) => s + Number(p.totalCost), 0);
   const profit = revenue - totalExpense - totalPurchaseSpend;
+  const totalDeposited = cashDeposits.reduce((s, d) => s + Number(d.amount), 0);
 
   const addExpense = () => {
     if (!form.amount) return;
@@ -1156,6 +1199,13 @@ function Accounting({ expenses, setExpenses, orders, purchases }) {
     setForm({ category: "Ingredients", description: "", amount: "", paymentMethod: "cash" }); setModal(false);
   };
   const removeExpense = (id) => setExpenses(expenses.filter((e) => e.id !== id));
+
+  const addDeposit = () => {
+    if (!depositAmount) return;
+    setCashDeposits([...cashDeposits, { id: uid(), amount: Number(depositAmount), notes: depositNotes, date: today() }]);
+    setDepositAmount(""); setDepositNotes(""); setDepositModal(false);
+  };
+  const removeDeposit = (id) => setCashDeposits(cashDeposits.filter((d) => d.id !== id));
 
   const paidOrders = orders.filter((o) => o.status === "paid");
 
@@ -1167,40 +1217,65 @@ function Accounting({ expenses, setExpenses, orders, purchases }) {
     return { ...p, in: moneyIn, out: expenseOut + purchaseOut, net: moneyIn - expenseOut - purchaseOut };
   }).filter((p) => p.in > 0 || p.out > 0);
 
-  const cashBalance = methodBreakdown.find((p) => p.id === "cash")?.net || 0;
-  const bankBalance = methodBreakdown.filter((p) => p.id !== "cash").reduce((s, p) => s + p.net, 0);
+  // cash deposits move money OUT of the till and INTO the bank — not revenue or expense, just a transfer
+  const cashBalance = (methodBreakdown.find((p) => p.id === "cash")?.net || 0) - totalDeposited;
+  const bankBalance = methodBreakdown.filter((p) => p.id !== "cash").reduce((s, p) => s + p.net, 0) + totalDeposited;
 
-  const exportToExcel = () => {
+  const exportToExcel = (scope) => {
+    const scoped = (arr, dateField = "date") => scope === "today" ? arr.filter((r) => (r[dateField] || "").slice(0, 10) === today()) : arr;
+    const scopedOrders = scoped(paidOrders, "createdAt");
+    const scopedExpenses = scoped(expenses);
+    const scopedPurchases = scoped(purchases);
+    const scopedDeposits = scoped(cashDeposits);
+
+    const rev = scopedOrders.reduce((s, o) => s + o.total, 0);
+    const exp = scopedExpenses.reduce((s, e) => s + Number(e.amount), 0);
+    const pur = scopedPurchases.reduce((s, p) => s + Number(p.totalCost), 0);
+    const dep = scopedDeposits.reduce((s, d) => s + Number(d.amount), 0);
+    const cashIn = scopedOrders.filter((o) => o.paymentMethod === "cash").reduce((s, o) => s + o.total, 0);
+    const cashOut = scopedExpenses.filter((e) => e.paymentMethod === "cash").reduce((s, e) => s + Number(e.amount), 0)
+      + scopedPurchases.filter((p) => p.paymentMethod === "cash").reduce((s, p) => s + Number(p.totalCost), 0);
+    const bankIn = scopedOrders.filter((o) => o.paymentMethod !== "cash").reduce((s, o) => s + o.total, 0);
+    const bankOut = scopedExpenses.filter((e) => e.paymentMethod !== "cash").reduce((s, e) => s + Number(e.amount), 0)
+      + scopedPurchases.filter((p) => p.paymentMethod !== "cash").reduce((s, p) => s + Number(p.totalCost), 0);
+
     const wb = XLSX.utils.book_new();
-
     const summarySheet = [
-      { Metric: "Total Revenue (Rs)", Value: revenue },
-      { Metric: "Total Expenses (Rs)", Value: totalExpense },
-      { Metric: "Total Purchases (Rs)", Value: totalPurchaseSpend },
-      { Metric: "Net Profit (Rs)", Value: profit },
-      { Metric: "Cash in Hand (Rs)", Value: cashBalance },
-      { Metric: "Bank Balance (Rs)", Value: bankBalance },
+      { Metric: scope === "today" ? "Revenue Today (Rs)" : "Total Revenue (Rs)", Value: rev },
+      { Metric: scope === "today" ? "Expenses Today (Rs)" : "Total Expenses (Rs)", Value: exp },
+      { Metric: scope === "today" ? "Purchases Today (Rs)" : "Total Purchases (Rs)", Value: pur },
+      { Metric: scope === "today" ? "Net Today (Rs)" : "Net Profit (Rs)", Value: rev - exp - pur },
+      { Metric: "Cash Deposited to Bank (Rs)", Value: dep },
+      { Metric: "Cash Movement — In (Rs)", Value: cashIn },
+      { Metric: "Cash Movement — Out (Rs)", Value: cashOut },
+      { Metric: "Bank Movement — In (Rs)", Value: bankIn },
+      { Metric: "Bank Movement — Out (Rs)", Value: bankOut },
     ];
+    if (scope === "all") {
+      summarySheet.push({ Metric: "Cash in Hand right now (Rs)", Value: cashBalance });
+      summarySheet.push({ Metric: "Bank Balance right now (Rs)", Value: bankBalance });
+    }
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summarySheet), "Summary");
 
-    if (methodBreakdown.length > 0) {
-      const methodSheet = methodBreakdown.map((p) => ({ "Payment Method": p.label, "Money In (Rs)": p.in, "Money Out (Rs)": p.out, "Net (Rs)": p.net }));
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(methodSheet), "Cash & Bank Reconciliation");
-    }
-
-    const expenseSheet = expenses.map((e) => ({
+    const expenseSheet = scopedExpenses.map((e) => ({
       Date: e.date, Category: e.category, Description: e.description, "Amount (Rs)": e.amount,
       "Paid Via": PAYMENT_METHODS.find((p) => p.id === e.paymentMethod)?.label || e.paymentMethod,
     }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(expenseSheet), "Expenses");
 
-    XLSX.writeFile(wb, `parijat-cafe-accounting-${today()}.xlsx`);
+    if (scopedDeposits.length > 0) {
+      const depositSheet = scopedDeposits.map((d) => ({ Date: d.date, "Amount (Rs)": d.amount, Notes: d.notes }));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(depositSheet), "Cash Deposits");
+    }
+
+    XLSX.writeFile(wb, `parijat-cafe-accounting-${scope === "today" ? today() : "all"}.xlsx`);
   };
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
-        <Btn variant="primary" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14, gap: 8 }}>
+        <Btn variant="ghost" onClick={() => exportToExcel("today")}><Download size={15} /> Export Today</Btn>
+        <Btn variant="primary" onClick={() => exportToExcel("all")}><Download size={15} /> Export All</Btn>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 14, marginBottom: 20 }}>
         <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Revenue</div><div style={{ fontSize: 22, fontWeight: 700, color: "#15803D", fontFamily: "inherit" }}>{money(revenue)}</div></Card>
@@ -1210,9 +1285,14 @@ function Accounting({ expenses, setExpenses, orders, purchases }) {
       </div>
 
       <Card style={{ padding: 18, marginBottom: 20 }}>
-        <h3 style={{ fontSize: 15, color: T.dusk, marginBottom: 4 }}>Cash & Bank Reconciliation</h3>
-        <div style={{ fontSize: 12, color: T.plum, opacity: 0.7, marginBottom: 16 }}>Cash sales minus cash spending vs. everything paid through card/FonePay/eSewa/Khalti/bank transfer.</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 14, marginBottom: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4, flexWrap: "wrap", gap: 10 }}>
+          <div>
+            <h3 style={{ fontSize: 15, color: T.dusk, marginBottom: 4 }}>Cash & Bank Reconciliation</h3>
+            <div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Cash sales minus cash spending vs. everything paid through card/FonePay/eSewa/Khalti/bank transfer.</div>
+          </div>
+          <Btn variant="gold" onClick={() => setDepositModal(true)}><Plus size={15} /> Log Cash Deposit</Btn>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 14, marginBottom: 18, marginTop: 14 }}>
           <div style={{ background: T.cream, borderRadius: 8, padding: 14 }}>
             <div style={{ fontSize: 11, color: T.plum, opacity: 0.7, textTransform: "uppercase", letterSpacing: 0.4 }}>Cash in Hand</div>
             <div style={{ fontSize: 22, fontWeight: 700, color: T.dusk }}>{money(cashBalance)}</div>
@@ -1221,9 +1301,13 @@ function Accounting({ expenses, setExpenses, orders, purchases }) {
             <div style={{ fontSize: 11, color: T.plum, opacity: 0.7, textTransform: "uppercase", letterSpacing: 0.4 }}>Bank Balance</div>
             <div style={{ fontSize: 22, fontWeight: 700, color: T.dusk }}>{money(bankBalance)}</div>
           </div>
+          <div style={{ background: T.cream, borderRadius: 8, padding: 14 }}>
+            <div style={{ fontSize: 11, color: T.plum, opacity: 0.7, textTransform: "uppercase", letterSpacing: 0.4 }}>Total Deposited to Bank</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: T.dusk }}>{money(totalDeposited)}</div>
+          </div>
         </div>
         {methodBreakdown.length > 0 && (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginBottom: cashDeposits.length ? 18 : 0 }}>
             <thead><tr style={{ textAlign: "left", color: T.plum, opacity: 0.65, fontSize: 11, textTransform: "uppercase" }}>
               <th style={{ padding: "6px 4px" }}>Method</th><th>In</th><th>Out</th><th>Net</th>
             </tr></thead>
@@ -1238,6 +1322,23 @@ function Accounting({ expenses, setExpenses, orders, purchases }) {
               ))}
             </tbody>
           </table>
+        )}
+        {cashDeposits.length > 0 && (
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: T.plum, marginBottom: 8 }}>Cash Deposits to Bank</div>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <tbody>
+                {cashDeposits.slice().reverse().map((d) => (
+                  <tr key={d.id} style={{ borderTop: `1px solid ${T.line}` }}>
+                    <td style={{ padding: "6px 4px", opacity: 0.7 }}>{d.date}</td>
+                    <td style={{ padding: "6px 4px" }}>{d.notes || "—"}</td>
+                    <td style={{ padding: "6px 4px", fontWeight: 600 }}>{money(d.amount)}</td>
+                    <td style={{ padding: "6px 4px", textAlign: "right" }}><button onClick={() => removeDeposit(d.id)} style={{ background: "none", border: "none", cursor: "pointer", color: T.plum, opacity: 0.5 }}><Trash2 size={13} /></button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </Card>
 
@@ -1279,6 +1380,17 @@ function Accounting({ expenses, setExpenses, orders, purchases }) {
             </select>
           </Field>
           <Btn variant="primary" onClick={addExpense} style={{ width: "100%", justifyContent: "center" }}>Add Expense</Btn>
+        </Modal>
+      )}
+
+      {depositModal && (
+        <Modal title="Log Cash Deposit" onClose={() => setDepositModal(false)}>
+          <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 14 }}>
+            Record cash you physically took from the till and deposited into the cafe's bank account. This moves the amount from Cash in Hand to Bank Balance.
+          </div>
+          <Field label="Amount Deposited (Rs)"><input type="number" style={inputStyle} value={depositAmount} onChange={(e) => setDepositAmount(e.target.value)} autoFocus /></Field>
+          <Field label="Notes"><input style={inputStyle} value={depositNotes} onChange={(e) => setDepositNotes(e.target.value)} placeholder="Optional — e.g. bank branch, slip number" /></Field>
+          <Btn variant="primary" onClick={addDeposit} style={{ width: "100%", justifyContent: "center" }}>Log Deposit</Btn>
         </Modal>
       )}
     </div>
@@ -1456,30 +1568,43 @@ function SalesReport({ orders, menu }) {
   }, [paid, menu]);
   const colors = [T.gold, T.dusk, T.sage, T.plum, T.red, "#B8ADD1"];
 
-  const exportToExcel = () => {
+  const exportToExcel = (scope) => {
+    const scopedPaid = scope === "today" ? paid.filter((o) => o.createdAt.slice(0, 10) === today()) : paid;
+
     const wb = XLSX.utils.book_new();
 
-    const ordersSheet = paid.map((o) => ({
+    const ordersSheet = scopedPaid.map((o) => ({
       Date: o.createdAt.slice(0, 10),
       Time: new Date(o.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       Table: o.tableName,
       Source: o.source,
       Items: o.items.map((it) => `${it.qty}x ${it.name}`).join(", "),
       "Payment Method": PAYMENT_METHODS.find((p) => p.id === o.paymentMethod)?.label || o.paymentMethod || "",
+      "Subtotal (Rs)": o.subtotal != null ? o.subtotal : o.total,
+      "Discount (Rs)": o.discount || 0,
       "Total (Rs)": o.total,
     }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ordersSheet), "Orders");
 
-    const dailySheet = byDay.map((d) => ({ Date: d.date, "Total Sales (Rs)": d.total }));
+    const dayMap = {};
+    scopedPaid.forEach((o) => { const d = o.createdAt.slice(0, 10); dayMap[d] = (dayMap[d] || 0) + o.total; });
+    const dailySheet = Object.entries(dayMap).sort().map(([date, total]) => ({ Date: date, "Total Sales (Rs)": total }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(dailySheet), "Sales by Day");
 
-    const itemSheet = byItem.map((i) => ({ Item: i.name, "Quantity Sold": i.qty }));
+    const itemMap = {};
+    scopedPaid.forEach((o) => o.items.forEach((it) => { itemMap[it.name] = (itemMap[it.name] || 0) + it.qty; }));
+    const itemSheet = Object.entries(itemMap).sort((a, b) => b[1] - a[1]).map(([name, qty]) => ({ Item: name, "Quantity Sold": qty }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(itemSheet), "Top Items");
 
-    const catSheet = byCategory.map((c) => ({ Category: c.name, "Revenue (Rs)": c.value }));
+    const catMap = {};
+    scopedPaid.forEach((o) => o.items.forEach((it) => {
+      const cat = menu.find((m) => m.id === it.menuId)?.category || "Other";
+      catMap[cat] = (catMap[cat] || 0) + it.qty * it.price;
+    }));
+    const catSheet = Object.entries(catMap).map(([name, value]) => ({ Category: name, "Revenue (Rs)": value }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(catSheet), "Revenue by Category");
 
-    XLSX.writeFile(wb, `parijat-cafe-sales-report-${today()}.xlsx`);
+    XLSX.writeFile(wb, `parijat-cafe-sales-report-${scope === "today" ? today() : "all"}.xlsx`);
   };
 
   if (paid.length === 0) {
@@ -1488,8 +1613,9 @@ function SalesReport({ orders, menu }) {
 
   return (
     <div style={{ display: "grid", gap: 20 }}>
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
-        <Btn variant="primary" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <Btn variant="ghost" onClick={() => exportToExcel("today")}><Download size={15} /> Export Today</Btn>
+        <Btn variant="primary" onClick={() => exportToExcel("all")}><Download size={15} /> Export All</Btn>
       </div>
       <Card style={{ padding: 20 }}>
         <h3 style={{ fontFamily: "inherit", fontSize: 15, color: T.dusk, marginBottom: 14 }}>Sales Over Time</h3>
@@ -1912,15 +2038,16 @@ function PurchaseManagement({ purchases, setPurchases, inventory, setInventory }
   const totalSpend = purchases.reduce((s, p) => s + p.totalCost, 0);
   const thisMonthSpend = purchases.filter((p) => p.date.slice(0, 7) === today().slice(0, 7)).reduce((s, p) => s + p.totalCost, 0);
 
-  const exportToExcel = () => {
+  const exportToExcel = (scope) => {
+    const scoped = scope === "today" ? purchases.filter((p) => p.date === today()) : purchases;
     const wb = XLSX.utils.book_new();
-    const sheet = purchases.map((p) => ({
+    const sheet = scoped.map((p) => ({
       Date: p.date, Item: p.itemName, Quantity: p.quantity, Unit: p.unit,
       "Unit Cost (Rs)": p.unitCost, "Total Cost (Rs)": p.totalCost, Supplier: p.supplier,
       "Paid Via": PAYMENT_METHODS.find((pm) => pm.id === p.paymentMethod)?.label || "Cash", Notes: p.notes,
     }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Purchases");
-    XLSX.writeFile(wb, `parijat-cafe-purchases-${today()}.xlsx`);
+    XLSX.writeFile(wb, `parijat-cafe-purchases-${scope === "today" ? today() : "all"}.xlsx`);
   };
 
   return (
@@ -1933,7 +2060,10 @@ function PurchaseManagement({ purchases, setPurchases, inventory, setInventory }
 
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
         <Btn variant="primary" onClick={openNew}><Plus size={15} /> Log Purchase</Btn>
-        <Btn variant="ghost" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn variant="ghost" onClick={() => exportToExcel("today")}><Download size={15} /> Export Today</Btn>
+          <Btn variant="ghost" onClick={() => exportToExcel("all")}><Download size={15} /> Export All</Btn>
+        </div>
       </div>
 
       <Card style={{ padding: 0, overflow: "hidden" }}>
