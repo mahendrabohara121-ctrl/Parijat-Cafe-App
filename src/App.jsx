@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo } from "react";
 import {
   LayoutDashboard, ClipboardList, LayoutGrid, Package, Wallet, UtensilsCrossed,
   Users, ChefHat, BarChart3, QrCode, ShoppingBag, Gift, Share2, Plus, X, Trash2,
-  Check, Clock, Flame, AlertTriangle, TrendingUp, TrendingDown, Search, Menu as MenuIcon, Shield, Eye, EyeOff, LogOut, Truck
+  Check, Clock, Flame, AlertTriangle, TrendingUp, TrendingDown, Search, Menu as MenuIcon, Shield, Eye, EyeOff, LogOut, Truck,
+  CalendarDays, Lock, Unlock, CheckCircle2
 } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -191,6 +192,46 @@ async function syncTable(key, oldArr, newArr) {
   }
 }
 
+/* ---------------- business days (keyed by date, not id — handled separately from the generic tables above) ---------------- */
+async function fetchBusinessDays() {
+  const { data, error } = await supabase.from("business_days").select("*");
+  if (error) { console.error("fetch business_days failed", error); return {}; }
+  const map = {};
+  data.forEach((r) => {
+    map[r.date] = {
+      date: r.date,
+      status: r.status,
+      openingCash: Number(r.opening_cash || 0),
+      actualClosingCash: Number(r.actual_closing_cash || 0),
+      openedAt: r.opened_at,
+      closedAt: r.closed_at,
+      openedBy: r.opened_by,
+      closedBy: r.closed_by,
+      closeNotes: r.close_notes || "",
+      closeSummary: r.close_summary || null,
+      audit: r.audit || [],
+    };
+  });
+  return map;
+}
+async function saveBusinessDay(day) {
+  const row = {
+    date: day.date,
+    status: day.status,
+    opening_cash: day.openingCash,
+    actual_closing_cash: day.actualClosingCash,
+    opened_at: day.openedAt,
+    closed_at: day.closedAt,
+    opened_by: day.openedBy,
+    closed_by: day.closedBy,
+    close_notes: day.closeNotes || "",
+    close_summary: day.closeSummary || null,
+    audit: day.audit || [],
+  };
+  const { error } = await supabase.from("business_days").upsert(row, { onConflict: "date" });
+  if (error) console.error("save business_day failed", error);
+}
+
 /* ---------------- small UI atoms ---------------- */
 function Pill({ children, tone = "neutral" }) {
   const tones = {
@@ -297,6 +338,143 @@ function Login({ staff, onLogin, error }) {
   );
 }
 
+/* ================= BUSINESS DAY ================= */
+const getBusinessDay = (days, date) => days[date] || {
+  date,
+  status: "closed",
+  openingCash: 0,
+  actualClosingCash: 0,
+  openedAt: null,
+  closedAt: null,
+  openedBy: null,
+  closedBy: null,
+  closeNotes: "",
+  closeSummary: null,
+  audit: [],
+};
+
+function BusinessDayControl({
+  businessDate, businessDay, orders, expenses, purchases, cashDeposits, currentUser,
+  onChangeDate, onOpenDay, onCloseDay, onReopenDay,
+}) {
+  const [openModal, setOpenModal] = useState(false);
+  const [closeModal, setCloseModal] = useState(false);
+  const [reopenModal, setReopenModal] = useState(false);
+  const [openingCash, setOpeningCash] = useState("");
+  const [actualCash, setActualCash] = useState("");
+  const [closeNotes, setCloseNotes] = useState("");
+  const [reopenReason, setReopenReason] = useState("");
+
+  const paidOrders = orders.filter((o) => o.status === "paid" && (o.paidAt || o.createdAt || "").slice(0, 10) === businessDate);
+  const dayExpenses = expenses.filter((e) => e.date === businessDate);
+  const dayPurchases = purchases.filter((p) => p.date === businessDate);
+  const dayDeposits = cashDeposits.filter((d) => d.date === businessDate);
+
+  const cashSales = paidOrders.filter((o) => o.paymentMethod === "cash").reduce((s, o) => s + Number(o.total || 0), 0);
+  const cashExpenses = dayExpenses.filter((e) => e.paymentMethod === "cash").reduce((s, e) => s + Number(e.amount || 0), 0);
+  const cashPurchases = dayPurchases.filter((p) => p.paymentMethod === "cash").reduce((s, p) => s + Number(p.totalCost || 0), 0);
+  const cashDeposited = dayDeposits.reduce((s, d) => s + Number(d.amount || 0), 0);
+  const totalSales = paidOrders.reduce((s, o) => s + Number(o.total || 0), 0);
+  const expectedCash = Number(businessDay.openingCash || 0) + cashSales - cashExpenses - cashPurchases - cashDeposited;
+  const difference = Number(actualCash || 0) - expectedCash;
+  const isOwnerOrManager = ["owner", "manager"].includes(currentUser?.role);
+
+  const formatDay = (d) => new Date(`${d}T00:00:00`).toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
+
+  return (
+    <>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, border: `1px solid ${T.line}`, borderRadius: 8, padding: "7px 10px", background: "#fff" }}>
+          <CalendarDays size={15} color={T.gold} />
+          <input aria-label="Business date" type="date" value={businessDate} onChange={(e) => onChangeDate(e.target.value)} style={{ border: "none", outline: "none", fontFamily: "inherit", fontSize: 12.5, color: T.dusk }} />
+        </div>
+        <div style={{ textAlign: "right", minWidth: 105 }}>
+          <div style={{ fontSize: 10, color: T.plum, opacity: 0.65, textTransform: "uppercase", letterSpacing: .5 }}>Business Day</div>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: T.dusk }}>{formatDay(businessDate)}</div>
+        </div>
+        <Pill tone={businessDay.status === "open" ? "good" : "bad"}>{businessDay.status === "open" ? "● Day Open" : "● Day Closed"}</Pill>
+        {businessDay.status === "open" ? (
+          <Btn variant="danger" onClick={() => { setActualCash(""); setCloseNotes(""); setCloseModal(true); }}><Lock size={14} /> Close Day</Btn>
+        ) : (
+          <Btn variant="primary" onClick={() => { setOpeningCash(""); setOpenModal(true); }}><Unlock size={14} /> Open Day</Btn>
+        )}
+      </div>
+
+      {openModal && (
+        <Modal title={`Open Business Day · ${formatDay(businessDate)}`} onClose={() => setOpenModal(false)} width={430}>
+          <div style={{ background: "#EFF6FF", borderRadius: 8, padding: 12, marginBottom: 14, fontSize: 12.5, color: "#1E40AF" }}>
+            Opening this date allows POS, expenses and purchases to be entered against this business day.
+          </div>
+          <Field label="Opening Cash in Drawer (Rs)">
+            <input autoFocus type="number" min="0" style={inputStyle} value={openingCash} onChange={(e) => setOpeningCash(e.target.value)} placeholder="e.g. 10000" />
+          </Field>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Btn variant="ghost" onClick={() => setOpenModal(false)}>Cancel</Btn>
+            <Btn variant="primary" onClick={() => {
+              const amount = Number(openingCash);
+              if (!Number.isFinite(amount) || amount < 0) return alert("Enter a valid opening cash amount.");
+              onOpenDay(amount);
+              setOpenModal(false);
+            }}>Open Business Day</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {closeModal && (
+        <Modal title={`Close Business Day · ${formatDay(businessDate)}`} onClose={() => setCloseModal(false)} width={520}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10, marginBottom: 16 }}>
+            {[
+              ["Total Sales", money(totalSales)],
+              ["Orders", paidOrders.length],
+              ["Cash Sales", money(cashSales)],
+              ["Cash Expenses", money(cashExpenses)],
+              ["Cash Purchases", money(cashPurchases)],
+              ["Cash Deposited", money(cashDeposited)],
+            ].map(([label, value]) => <div key={label} style={{ background: T.cream, borderRadius: 8, padding: 12 }}><div style={{ fontSize: 11, color: T.plum, opacity: .7 }}>{label}</div><div style={{ fontSize: 16, fontWeight: 700, color: T.dusk }}>{value}</div></div>)}
+          </div>
+          <div style={{ background: "#F8FAFC", border: `1px solid ${T.line}`, borderRadius: 10, padding: 14, marginBottom: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span>Opening Cash</span><strong>{money(businessDay.openingCash)}</strong></div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span>Expected Closing Cash</span><strong>{money(expectedCash)}</strong></div>
+            <div style={{ fontSize: 11.5, color: T.plum, opacity: .75 }}>Expected = opening cash + cash sales − cash expenses − cash purchases − cash deposits.</div>
+          </div>
+          <Field label="Actual Cash Counted (Rs)"><input autoFocus type="number" min="0" style={inputStyle} value={actualCash} onChange={(e) => setActualCash(e.target.value)} placeholder="Count the physical drawer cash" /></Field>
+          {actualCash !== "" && <div style={{ background: difference === 0 ? "#DCFCE7" : "#FEE2E2", color: difference === 0 ? "#15803D" : "#B91C1C", borderRadius: 8, padding: 11, marginBottom: 14, fontSize: 13 }}><strong>{difference === 0 ? "Cash matches." : "Cash difference"}</strong> · {money(difference)}</div>}
+          <Field label="Closing Notes"><textarea style={{ ...inputStyle, minHeight: 70, resize: "vertical" }} value={closeNotes} onChange={(e) => setCloseNotes(e.target.value)} placeholder="Optional note about the closing count…" /></Field>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Btn variant="ghost" onClick={() => setCloseModal(false)}>Cancel</Btn>
+            <Btn variant="danger" onClick={() => {
+              const amount = Number(actualCash);
+              if (!Number.isFinite(amount) || amount < 0) return alert("Enter the actual cash counted.");
+              onCloseDay(amount, closeNotes, { expectedCash, totalSales, paidOrders: paidOrders.length, cashSales, cashExpenses, cashPurchases, cashDeposited });
+              setCloseModal(false);
+            }}><Lock size={14} /> Confirm Close Day</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {reopenModal && (
+        <Modal title={`Reopen Business Day · ${formatDay(businessDate)}`} onClose={() => setReopenModal(false)} width={430}>
+          <div style={{ background: "#FEF3C7", color: "#92400E", borderRadius: 8, padding: 12, marginBottom: 14, fontSize: 12.5 }}>
+            Reopening a closed day is an administrative action and will be written to the audit log.
+          </div>
+          <Field label="Reason for Reopening"><textarea autoFocus style={{ ...inputStyle, minHeight: 90, resize: "vertical" }} value={reopenReason} onChange={(e) => setReopenReason(e.target.value)} placeholder="e.g. Correcting a wrong payment entry…" /></Field>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Btn variant="ghost" onClick={() => setReopenModal(false)}>Cancel</Btn>
+            <Btn variant="danger" disabled={!isOwnerOrManager || !reopenReason.trim()} onClick={() => { onReopenDay(reopenReason.trim()); setReopenModal(false); }}>Reopen Day</Btn>
+          </div>
+          {!isOwnerOrManager && <div style={{ fontSize: 11.5, color: T.red, marginTop: 8 }}>Only Owner or Manager can reopen a closed day.</div>}
+        </Modal>
+      )}
+
+      {businessDay.status === "closed" && isOwnerOrManager && (
+        <div style={{ marginTop: 7, textAlign: "right" }}>
+          <button onClick={() => setReopenModal(true)} style={{ background: "none", border: "none", color: T.plum, cursor: "pointer", fontSize: 11.5, textDecoration: "underline" }}>Reopen this closed day</button>
+        </div>
+      )}
+    </>
+  );
+}
+
 /* ================= MAIN APP ================= */
 export default function App() {
   const [loading, setLoading] = useState(true);
@@ -316,6 +494,8 @@ export default function App() {
   const [purchases, setPurchases] = useState([]);
   const [cashDeposits, setCashDeposits] = useState([]);
   const [staff, setStaff] = useState([]);
+  const [businessDate, setBusinessDate] = useState(today());
+  const [businessDays, setBusinessDays] = useState({});
 
   useEffect(() => {
     const link = document.createElement("link");
@@ -327,7 +507,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const [m, t, o, inv, w, exp, cust, ref, purch, deposits] = await Promise.all([
+      const [m, t, o, inv, w, exp, cust, ref, purch, deposits, days] = await Promise.all([
         fetchTable("menu"),
         fetchTable("tables"),
         fetchTable("orders"),
@@ -338,6 +518,7 @@ export default function App() {
         fetchTable("referrals"),
         fetchTable("purchases"),
         fetchTable("cashDeposits"),
+        fetchBusinessDays(),
       ]);
       // seed empty tables on very first run so the app isn't blank
       setMenu(m.length ? m : SEED_MENU);
@@ -350,6 +531,7 @@ export default function App() {
       setReferrals(ref);
       setPurchases(purch);
       setCashDeposits(deposits);
+      setBusinessDays(days);
       if (!m.length) syncTable("menu", [], SEED_MENU);
       if (!t.length) syncTable("tables", [], SEED_TABLES);
       if (!inv.length) syncTable("inventory", [], SEED_INVENTORY);
@@ -392,6 +574,58 @@ export default function App() {
       const { data } = await supabase.rpc("list_staff");
       setStaff(data || []);
     },
+  };
+
+  const currentBusinessDay = getBusinessDay(businessDays, businessDate);
+
+  // updates local state immediately and saves just that one day's row to Supabase in the background
+  const updateBusinessDay = (dateKey, updater) => {
+    setBusinessDays((prev) => {
+      const nextDay = updater(getBusinessDay(prev, dateKey));
+      const next = { ...prev, [dateKey]: nextDay };
+      saveBusinessDay(nextDay);
+      return next;
+    });
+  };
+
+  const openBusinessDay = (openingCash) => {
+    if (currentBusinessDay.status === "open") return;
+    updateBusinessDay(businessDate, (day) => ({
+      ...day,
+      status: "open",
+      openingCash: Number(openingCash),
+      actualClosingCash: 0,
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      openedBy: currentUser?.name || "Unknown",
+      closedBy: null,
+      closeNotes: "",
+      audit: [...(day.audit || []), { action: "DAY_OPENED", at: new Date().toISOString(), by: currentUser?.name || "Unknown", openingCash: Number(openingCash) }],
+    }));
+  };
+
+  const closeBusinessDay = (actualClosingCash, closeNotes, summary) => {
+    if (currentBusinessDay.status !== "open") return;
+    updateBusinessDay(businessDate, (day) => ({
+      ...day,
+      status: "closed",
+      actualClosingCash: Number(actualClosingCash),
+      closedAt: new Date().toISOString(),
+      closedBy: currentUser?.name || "Unknown",
+      closeNotes: closeNotes || "",
+      closeSummary: summary,
+      audit: [...(day.audit || []), { action: "DAY_CLOSED", at: new Date().toISOString(), by: currentUser?.name || "Unknown", actualClosingCash: Number(actualClosingCash), ...summary, notes: closeNotes || "" }],
+    }));
+  };
+
+  const reopenBusinessDay = (reason) => {
+    updateBusinessDay(businessDate, (day) => ({
+      ...day,
+      status: "open",
+      closedAt: null,
+      closedBy: null,
+      audit: [...(day.audit || []), { action: "DAY_REOPENED", at: new Date().toISOString(), by: currentUser?.name || "Unknown", reason }],
+    }));
   };
 
   const NAV = [
@@ -499,24 +733,43 @@ export default function App() {
             <button onClick={() => setSidebarOpen(true)} className="parijat-hamburger" style={{ background: "none", border: "none", cursor: "pointer", color: T.dusk, display: "none" }}><MenuIcon size={20} /></button>
             <h2 style={{ fontFamily: "inherit", fontSize: 20, fontWeight: 600, color: T.dusk }}>{activeLabel}</h2>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", justifyContent: "flex-end" }}>
             <LiveClock />
-            <Pill tone="good">● Live</Pill>
+            <BusinessDayControl
+              businessDate={businessDate}
+              businessDay={currentBusinessDay}
+              orders={orders}
+              expenses={expenses}
+              purchases={purchases}
+              cashDeposits={cashDeposits}
+              currentUser={currentUser}
+              onChangeDate={setBusinessDate}
+              onOpenDay={openBusinessDay}
+              onCloseDay={closeBusinessDay}
+              onReopenDay={reopenBusinessDay}
+            />
           </div>
         </div>
         <div style={{ padding: 24 }}>
-          {active === "overview" && <Overview orders={orders} tables={tables} inventory={inventory} expenses={expenses} customers={customers} />}
-          {active === "orders" && <Orders menu={menu} tables={tables} orders={orders} setOrders={persist.orders} setTables={persist.tables} customers={customers} setCustomers={persist.customers} currentUser={currentUser} />}
+          <div style={{ marginBottom: 18, padding: "10px 14px", borderRadius: 10, background: currentBusinessDay.status === "open" ? "#ECFDF5" : "#FEF2F2", border: `1px solid ${currentBusinessDay.status === "open" ? "#BBF7D0" : "#FECACA"}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+              {currentBusinessDay.status === "open" ? <CheckCircle2 size={16} color={T.sage} /> : <Lock size={16} color={T.red} />}
+              <div><strong style={{ fontSize: 12.5, color: currentBusinessDay.status === "open" ? "#166534" : "#991B1B" }}>{currentBusinessDay.status === "open" ? "Business Day is OPEN" : "Business Day is CLOSED"}</strong><div style={{ fontSize: 11.5, color: T.plum }}>All transactions are assigned to {businessDate}.</div></div>
+            </div>
+            <div style={{ fontSize: 11.5, color: T.plum }}>{currentBusinessDay.status === "open" ? `Opened ${currentBusinessDay.openedAt ? new Date(currentBusinessDay.openedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}` : "POS and operational entries are locked."}</div>
+          </div>
+          {active === "overview" && <Overview orders={orders} tables={tables} inventory={inventory} expenses={expenses} customers={customers} businessDate={businessDate} />}
+          {active === "orders" && <Orders menu={menu} tables={tables} orders={orders} setOrders={persist.orders} setTables={persist.tables} customers={customers} setCustomers={persist.customers} currentUser={currentUser} businessDay={currentBusinessDay} />}
           {active === "kds" && <KDS orders={orders} setOrders={persist.orders} tables={tables} setTables={persist.tables} menu={menu} />}
           {active === "tables" && <TablesView tables={tables} setTables={persist.tables} orders={orders} />}
-          {active === "purchase" && <PurchaseManagement purchases={purchases} setPurchases={persist.purchases} inventory={inventory} setInventory={persist.inventory} />}
-          {active === "inventory" && <Inventory inventory={inventory} setInventory={persist.inventory} waste={waste} setWaste={persist.waste} />}
-          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} cashDeposits={cashDeposits} setCashDeposits={persist.cashDeposits} />}
+          {active === "purchase" && <PurchaseManagement purchases={purchases} setPurchases={persist.purchases} inventory={inventory} setInventory={persist.inventory} businessDay={currentBusinessDay} />}
+          {active === "inventory" && <Inventory inventory={inventory} setInventory={persist.inventory} waste={waste} setWaste={persist.waste} businessDay={currentBusinessDay} />}
+          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} cashDeposits={cashDeposits} setCashDeposits={persist.cashDeposits} businessDay={currentBusinessDay} />}
           {active === "menu" && <MenuManagement menu={menu} setMenu={persist.menu} />}
           {active === "crm" && <CRM customers={customers} setCustomers={persist.customers} orders={orders} />}
           {active === "sales" && <SalesReport orders={orders} menu={menu} />}
           {active === "qr" && <QRMenu menu={menu} />}
-          {active === "online" && <OnlineOrder menu={menu} orders={orders} setOrders={persist.orders} />}
+          {active === "online" && <OnlineOrder menu={menu} orders={orders} setOrders={persist.orders} businessDay={currentBusinessDay} />}
           {active === "loyalty" && <Loyalty customers={customers} setCustomers={persist.customers} />}
           {active === "refer" && <ReferEarn customers={customers} referrals={referrals} setReferrals={persist.referrals} setCustomers={persist.customers} />}
           {active === "staff" && <StaffManagement staff={staff} refreshStaff={persist.refreshStaff} currentUser={currentUser} />}
@@ -624,9 +877,10 @@ const PAYMENT_METHODS = [
   { id: "khalti", label: "Khalti" },
   { id: "card", label: "Card" },
   { id: "bank", label: "Bank Transfer" },
+  { id: "credit", label: "Credit" },
 ];
 
-function Orders({ menu, tables, orders, setOrders, setTables, customers, setCustomers, currentUser }) {
+function Orders({ menu, tables, orders, setOrders, setTables, customers, setCustomers, currentUser, businessDay }) {
   const canManageMoney = currentUser && (currentUser.role === "owner" || currentUser.role === "manager"); // Discount & Void Bill are Owner/Manager only
   const [modal, setModal] = useState(false);
   const [tableId, setTableId] = useState("");
@@ -648,6 +902,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
   const cartTotal = Object.entries(cart).reduce((s, [id, qty]) => s + qty * (menu.find((m) => m.id === id)?.price || 0), 0);
 
   const placeOrder = () => {
+    if (businessDay.status !== "open") { alert("Business Day is closed. Open the business day before creating an order."); return; }
     if (!tableId || Object.keys(cart).length === 0) return;
     const table = tables.find((t) => t.id === tableId);
     const items = Object.entries(cart).map(([id, qty]) => {
@@ -709,6 +964,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
   };
 
   const settlePayment = (order, method) => {
+    if (businessDay.status !== "open") { alert("Business Day is closed. Reopen it before taking payment."); return; }
     setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "paid", paymentMethod: method, paidAt: new Date().toISOString() } : o)));
     setTables(tables.map((t) => (t.id === order.tableId ? { ...t, status: "free", orderId: null } : t)));
     // loyalty points: 1 point per Rs 100
@@ -802,7 +1058,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <Btn variant="ghost" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
-          <Btn variant="primary" onClick={() => setModal(true)}><Plus size={15} /> New Order</Btn>
+          <Btn variant="primary" disabled={businessDay.status !== "open"} onClick={() => setModal(true)}><Plus size={15} /> New Order</Btn>
         </div>
       </div>
 
@@ -1115,7 +1371,7 @@ function TablesView({ tables, setTables, orders }) {
 }
 
 /* ================= INVENTORY & WASTE ================= */
-function Inventory({ inventory, setInventory, waste, setWaste }) {
+function Inventory({ inventory, setInventory, waste, setWaste, businessDay }) {
   const [tab, setTab] = useState("stock");
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState({ name: "", unit: "kg", stock: "", reorder: "" });
@@ -1131,6 +1387,7 @@ function Inventory({ inventory, setInventory, waste, setWaste }) {
   const removeItem = (id) => setInventory(inventory.filter((i) => i.id !== id));
 
   const logWaste = () => {
+    if (businessDay.status !== "open") { alert("Business Day is closed. Open it before logging waste."); return; }
     const item = inventory.find((i) => i.id === wasteForm.itemId);
     if (!item || !wasteForm.qty) return;
     setWaste([...waste, { id: uid(), itemName: item.name, qty: Number(wasteForm.qty), unit: item.unit, reason: wasteForm.reason || "Unspecified", date: today() }]);
@@ -1240,7 +1497,7 @@ function Inventory({ inventory, setInventory, waste, setWaste }) {
 }
 
 /* ================= ACCOUNTING ================= */
-function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, setCashDeposits }) {
+function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, setCashDeposits, businessDay }) {
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState({ category: "Ingredients", description: "", amount: "", paymentMethod: "cash" });
   const [depositModal, setDepositModal] = useState(false);
@@ -1254,6 +1511,7 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
   const totalDeposited = cashDeposits.reduce((s, d) => s + Number(d.amount), 0);
 
   const addExpense = () => {
+    if (businessDay.status !== "open") { alert("Business Day is closed. Open it before adding an expense."); return; }
     if (!form.amount) return;
     setExpenses([...expenses, { id: uid(), category: form.category, description: form.description, amount: Number(form.amount), date: today(), paymentMethod: form.paymentMethod }]);
     setForm({ category: "Ingredients", description: "", amount: "", paymentMethod: "cash" }); setModal(false);
@@ -1261,6 +1519,7 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
   const removeExpense = (id) => setExpenses(expenses.filter((e) => e.id !== id));
 
   const addDeposit = () => {
+    if (businessDay.status !== "open") { alert("Business Day is closed. Open it before logging a cash deposit."); return; }
     if (!depositAmount) return;
     setCashDeposits([...cashDeposits, { id: uid(), amount: Number(depositAmount), notes: depositNotes, date: today() }]);
     setDepositAmount(""); setDepositNotes(""); setDepositModal(false);
@@ -1752,7 +2011,7 @@ function QRMenu({ menu }) {
 }
 
 /* ================= ONLINE ORDER ================= */
-function OnlineOrder({ menu, orders, setOrders }) {
+function OnlineOrder({ menu, orders, setOrders, businessDay }) {
   const [cart, setCart] = useState({});
   const [customerName, setCustomerName] = useState("");
   const [phone, setPhone] = useState("");
@@ -1762,6 +2021,7 @@ function OnlineOrder({ menu, orders, setOrders }) {
   const total = Object.entries(cart).reduce((s, [id, qty]) => s + qty * (menu.find((m) => m.id === id)?.price || 0), 0);
 
   const checkout = () => {
+    if (businessDay.status !== "open") { alert("Business Day is closed. Open it before accepting an online order."); return; }
     const items = Object.entries(cart).map(([id, qty]) => {
       const m = menu.find((mm) => mm.id === id);
       return { menuId: id, name: m.name, qty, price: m.price };
@@ -2051,7 +2311,7 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
 }
 
 /* ================= PURCHASE MANAGEMENT ================= */
-function PurchaseManagement({ purchases, setPurchases, inventory, setInventory }) {
+function PurchaseManagement({ purchases, setPurchases, inventory, setInventory, businessDay }) {
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState({ itemId: "", itemName: "", quantity: "", unit: "kg", unitCost: "", supplier: "", notes: "", paymentMethod: "cash" });
   const [mode, setMode] = useState("existing"); // "existing" inventory item, or "new" one-off item
@@ -2070,6 +2330,7 @@ function PurchaseManagement({ purchases, setPurchases, inventory, setInventory }
   const totalCost = (Number(form.quantity) || 0) * (Number(form.unitCost) || 0);
 
   const save = () => {
+    if (businessDay.status !== "open") { alert("Business Day is closed. Open it before logging a purchase."); return; }
     if (!form.itemName || !form.quantity || !form.unitCost) return;
     const entry = {
       id: uid(),
