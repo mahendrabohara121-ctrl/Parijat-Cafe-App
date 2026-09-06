@@ -166,7 +166,13 @@ async function fetchTable(key) {
   const { table, fromDb } = TABLE_MAP[key];
   const { data, error } = await supabase.from(table).select("*");
   if (error) { console.error("fetch failed", table, error); return []; }
-  return data.map(fromDb);
+  const rows = data.map(fromDb);
+  // Supabase doesn't guarantee row order without an explicit ORDER BY, so screens that assume
+  // chronological order (oldest-first, e.g. "take the last 6 = most recent") can silently break.
+  // Sort here, once, at the source, so every screen sees consistent chronological data.
+  const sortKey = rows[0] && "createdAt" in rows[0] ? "createdAt" : (rows[0] && "date" in rows[0] ? "date" : null);
+  if (sortKey) rows.sort((a, b) => new Date(a[sortKey]) - new Date(b[sortKey]));
+  return rows;
 }
 
 // reconcile the whole in-memory array back to Supabase: upsert everything present,
@@ -562,7 +568,7 @@ function Overview({ orders, tables, inventory, expenses, customers }) {
       <Card style={{ padding: 20 }}>
         <h3 style={{ fontFamily: "inherit", fontSize: 16, marginBottom: 14, color: T.dusk }}>Recent Orders</h3>
         {orders.length === 0 ? <Empty text="No orders yet — head to Order & KOT to create the first one." /> : (
-          <OrderTable rows={orders.slice(-6).reverse()} />
+          <OrderTable rows={orders.slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 6)} />
         )}
       </Card>
     </div>
@@ -741,7 +747,10 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     setVoidTarget(null);
   };
 
-  const visible = orders.filter((o) => filter === "active" ? !["paid", "cancelled"].includes(o.status) : true).slice().reverse();
+  const visible = orders
+    .filter((o) => filter === "active" ? !["paid", "cancelled"].includes(o.status) : true)
+    .slice()
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)); // newest first, explicit — never rely on array order alone
   const toneFor = { placed: "warn", preparing: "gold", ready: "good", served: "neutral", paid: "good", cancelled: "bad" };
   const nextLabel = { placed: "Send to Kitchen", preparing: "Mark Ready", ready: "Mark Served", served: "Mark Paid" };
 
@@ -761,7 +770,8 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
       if (!groups[key]) groups[key] = [];
       groups[key].push(o);
     });
-    return Object.entries(groups); // already in descending order since `visible` is reversed and grouped in that order
+    // sort explicitly by date descending — never rely on insertion order being correct
+    return Object.entries(groups).sort((a, b) => b[0].localeCompare(a[0]));
   }, [visible]);
 
   const exportToExcel = () => {
