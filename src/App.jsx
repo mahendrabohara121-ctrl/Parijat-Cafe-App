@@ -500,7 +500,7 @@ export default function App() {
         </div>
         <div style={{ padding: 24 }}>
           {active === "overview" && <Overview orders={orders} tables={tables} inventory={inventory} expenses={expenses} customers={customers} />}
-          {active === "orders" && <Orders menu={menu} tables={tables} orders={orders} setOrders={persist.orders} setTables={persist.tables} customers={customers} setCustomers={persist.customers} />}
+          {active === "orders" && <Orders menu={menu} tables={tables} orders={orders} setOrders={persist.orders} setTables={persist.tables} customers={customers} setCustomers={persist.customers} currentUser={currentUser} />}
           {active === "kds" && <KDS orders={orders} setOrders={persist.orders} tables={tables} setTables={persist.tables} menu={menu} />}
           {active === "tables" && <TablesView tables={tables} setTables={persist.tables} orders={orders} />}
           {active === "purchase" && <PurchaseManagement purchases={purchases} setPurchases={persist.purchases} inventory={inventory} setInventory={persist.inventory} />}
@@ -620,7 +620,8 @@ const PAYMENT_METHODS = [
   { id: "bank", label: "Bank Transfer" },
 ];
 
-function Orders({ menu, tables, orders, setOrders, setTables, customers, setCustomers }) {
+function Orders({ menu, tables, orders, setOrders, setTables, customers, setCustomers, currentUser }) {
+  const canManageMoney = currentUser && (currentUser.role === "owner" || currentUser.role === "manager"); // Discount & Void Bill are Owner/Manager only
   const [modal, setModal] = useState(false);
   const [tableId, setTableId] = useState("");
   const [cart, setCart] = useState({});
@@ -719,8 +720,11 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
   const [voidReason, setVoidReason] = useState("");
 
   const openCancel = (order) => {
-    if (order.status === "paid") { setVoidTarget(order); setVoidReason(""); return; } // paid bills need a reason
-    cancelOrder(order); // not-yet-paid orders cancel instantly, same as before
+    if (order.status === "paid") {
+      if (!canManageMoney) return; // safety check — paid-bill voiding is Owner/Manager only
+      setVoidTarget(order); setVoidReason(""); return;
+    }
+    cancelOrder(order); // not-yet-paid orders cancel instantly, same as before — any role can do this
   };
 
   const confirmVoid = () => {
@@ -741,10 +745,31 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
   const toneFor = { placed: "warn", preparing: "gold", ready: "good", served: "neutral", paid: "good", cancelled: "bad" };
   const nextLabel = { placed: "Send to Kitchen", preparing: "Mark Ready", ready: "Mark Served", served: "Mark Paid" };
 
+  // group orders by calendar day so it's obvious which day you're looking at without exporting anything
+  const dateLabel = (dateStr) => {
+    const d = dateStr.slice(0, 10);
+    if (d === today()) return "Today";
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    if (d === yesterday) return "Yesterday";
+    return new Date(dateStr).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  };
+  const timeLabel = (dateStr) => new Date(dateStr).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const groupedByDay = useMemo(() => {
+    const groups = {};
+    visible.forEach((o) => {
+      const key = o.createdAt ? o.createdAt.slice(0, 10) : "unknown";
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(o);
+    });
+    return Object.entries(groups); // already in descending order since `visible` is reversed and grouped in that order
+  }, [visible]);
+
   const exportToExcel = () => {
     const wb = XLSX.utils.book_new();
     const sheet = orders.map((o) => ({
       Date: o.createdAt ? o.createdAt.slice(0, 10) : "",
+      Time: o.createdAt ? new Date(o.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "",
+      "Paid At": o.paidAt ? new Date(o.paidAt).toLocaleString() : "",
       Table: o.tableName, Source: o.source, Status: o.status,
       Items: o.items.map((it) => `${it.qty}x ${it.name}`).join(", "),
       "Payment Method": PAYMENT_METHODS.find((p) => p.id === o.paymentMethod)?.label || "",
@@ -772,48 +797,63 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
       </div>
 
       {visible.length === 0 ? <Card style={{ padding: 20 }}><Empty text="No orders here yet." /></Card> : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {visible.map((o) => (
-            <Card key={o.id} style={{ padding: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
-                <div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
-                    <strong style={{ fontFamily: "inherit", color: T.dusk }}>{o.tableName}</strong>
-                    <Pill tone={toneFor[o.status]}>{o.status}</Pill>
-                    {o.source !== "dine-in" && <Pill>{o.source}</Pill>}
-                    {o.status === "paid" && o.paymentMethod && (
-                      <Pill tone="gold">{PAYMENT_METHODS.find((p) => p.id === o.paymentMethod)?.label || o.paymentMethod}</Pill>
-                    )}
-                    {o.status === "cancelled" && o.cancelledFromPaid && <Pill tone="bad">Voided after payment</Pill>}
-                    {o.discount > 0 && <Pill tone="good">Discount applied</Pill>}
-                  </div>
-                  <div style={{ fontSize: 13, color: T.plum }}>
-                    {o.items.map((it) => `${it.qty}× ${it.name}`).join(", ")}
-                  </div>
-                  {o.discount > 0 && (
-                    <div style={{ fontSize: 12, color: T.plum, opacity: 0.75, marginTop: 4 }}>
-                      Subtotal {money(o.subtotal != null ? o.subtotal : o.total)} · Discount −{money(o.discount)}
-                    </div>
-                  )}
-                  {o.cancelReason && <div style={{ fontSize: 12, color: T.red, marginTop: 4 }}>Reason: {o.cancelReason}</div>}
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontWeight: 700, fontFamily: "inherit", color: T.dusk, marginBottom: 8 }}>{money(o.total)}</div>
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                    {!["paid", "cancelled"].includes(o.status) && <Btn variant="ghost" onClick={() => openAddItem(o)}><Plus size={14} /> Add Item</Btn>}
-                    {!["paid", "cancelled"].includes(o.status) && <Btn variant="ghost" onClick={() => openDiscount(o)}>Discount</Btn>}
-                    {nextLabel[o.status] && <Btn variant="gold" onClick={() => advance(o)}>{nextLabel[o.status]}</Btn>}
-                    {o.status !== "cancelled" && <Btn variant="danger" onClick={() => openCancel(o)}>{o.status === "paid" ? "Void Bill" : "Cancel"}</Btn>}
-                  </div>
-                </div>
+        <div style={{ display: "grid", gap: 22 }}>
+          {groupedByDay.map(([dateKey, dayOrders]) => (
+            <div key={dateKey}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <strong style={{ fontSize: 13, color: T.dusk }}>{dateLabel(dayOrders[0].createdAt)}</strong>
+                <span style={{ fontSize: 11.5, color: T.plum, opacity: 0.6 }}>{new Date(dayOrders[0].createdAt).toLocaleDateString()}</span>
+                <Pill>{dayOrders.length} order{dayOrders.length !== 1 ? "s" : ""}</Pill>
               </div>
-            </Card>
+              <div style={{ display: "grid", gap: 12 }}>
+                {dayOrders.map((o) => (
+                  <Card key={o.id} style={{ padding: 16 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+                      <div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
+                          <strong style={{ fontFamily: "inherit", color: T.dusk }}>{o.tableName}</strong>
+                          <Pill tone={toneFor[o.status]}>{o.status}</Pill>
+                          {o.source !== "dine-in" && <Pill>{o.source}</Pill>}
+                          {o.status === "paid" && o.paymentMethod && (
+                            <Pill tone="gold">{PAYMENT_METHODS.find((p) => p.id === o.paymentMethod)?.label || o.paymentMethod}</Pill>
+                          )}
+                          {o.status === "cancelled" && o.cancelledFromPaid && <Pill tone="bad">Voided after payment</Pill>}
+                          {o.discount > 0 && <Pill tone="good">Discount applied</Pill>}
+                        </div>
+                        <div style={{ fontSize: 11.5, color: T.plum, opacity: 0.65, marginBottom: 4, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          <span>Placed {timeLabel(o.createdAt)}</span>
+                          {o.status === "paid" && o.paidAt && <span>· Paid {timeLabel(o.paidAt)}</span>}
+                        </div>
+                        <div style={{ fontSize: 13, color: T.plum }}>
+                          {o.items.map((it) => `${it.qty}× ${it.name}`).join(", ")}
+                        </div>
+                        {o.discount > 0 && (
+                          <div style={{ fontSize: 12, color: T.plum, opacity: 0.75, marginTop: 4 }}>
+                            Subtotal {money(o.subtotal != null ? o.subtotal : o.total)} · Discount −{money(o.discount)}
+                          </div>
+                        )}
+                        {o.cancelReason && <div style={{ fontSize: 12, color: T.red, marginTop: 4 }}>Reason: {o.cancelReason}</div>}
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontWeight: 700, fontFamily: "inherit", color: T.dusk, marginBottom: 8 }}>{money(o.total)}</div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                          {!["paid", "cancelled"].includes(o.status) && <Btn variant="ghost" onClick={() => openAddItem(o)}><Plus size={14} /> Add Item</Btn>}
+                          {!["paid", "cancelled"].includes(o.status) && canManageMoney && <Btn variant="ghost" onClick={() => openDiscount(o)}>Discount</Btn>}
+                          {nextLabel[o.status] && <Btn variant="gold" onClick={() => advance(o)}>{nextLabel[o.status]}</Btn>}
+                          {o.status !== "cancelled" && (o.status !== "paid" || canManageMoney) && <Btn variant="danger" onClick={() => openCancel(o)}>{o.status === "paid" ? "Void Bill" : "Cancel"}</Btn>}
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            </div>
           ))}
         </div>
       )}
 
       {modal && (
-        <Modal title="New Order" onClose={() => setModal(false)} width={520}>
+        <Modal title="New Order" onClose={() => setModal(false)} width={640}>
           <Field label="Table">
             <select style={inputStyle} value={tableId} onChange={(e) => setTableId(e.target.value)}>
               <option value="">Select a table</option>
@@ -824,17 +864,22 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
             <Search size={14} style={{ position: "absolute", left: 10, top: 10, color: T.plum, opacity: 0.5 }} />
             <input style={{ ...inputStyle, paddingLeft: 30 }} placeholder="Search menu…" value={itemSearch} onChange={(e) => setItemSearch(e.target.value)} />
           </div>
-          <div style={{ maxHeight: 260, overflowY: "auto", border: `1px solid ${T.line}`, borderRadius: 8, marginBottom: 14 }}>
-            {menu.filter((m) => m.available && m.name.toLowerCase().includes(itemSearch.toLowerCase())).map((m) => (
-              <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderBottom: `1px solid ${T.line}` }}>
-                <div><div style={{ fontSize: 13.5, fontWeight: 600 }}>{m.name}</div><div style={{ fontSize: 11.5, color: T.plum, opacity: 0.7 }}>{money(m.price)}</div></div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <button onClick={() => removeFromCart(m)} style={{ border: `1px solid ${T.line}`, background: "#fff", borderRadius: 6, width: 24, height: 24, cursor: "pointer" }}>–</button>
-                  <span style={{ minWidth: 14, textAlign: "center", fontSize: 13 }}>{cart[m.id] || 0}</span>
-                  <button onClick={() => addToCart(m)} style={{ border: "none", background: T.dusk, color: "#fff", borderRadius: 6, width: 24, height: 24, cursor: "pointer" }}>+</button>
+          <div style={{ maxHeight: 320, overflowY: "auto", marginBottom: 14 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+              {menu.filter((m) => m.available && m.name.toLowerCase().includes(itemSearch.toLowerCase())).map((m) => (
+                <div key={m.id} style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.25 }}>{m.name}</div>
+                    <div style={{ fontSize: 11.5, color: T.gold, marginTop: 2 }}>{money(m.price)}</div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: "auto" }}>
+                    <button onClick={() => removeFromCart(m)} style={{ border: `1px solid ${T.line}`, background: "#fff", borderRadius: 6, width: 26, height: 26, cursor: "pointer" }}>–</button>
+                    <span style={{ minWidth: 16, textAlign: "center", fontSize: 13, fontWeight: 600 }}>{cart[m.id] || 0}</span>
+                    <button onClick={() => addToCart(m)} style={{ border: "none", background: T.dusk, color: "#fff", borderRadius: 6, width: 26, height: 26, cursor: "pointer" }}>+</button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <strong style={{ fontFamily: "inherit", fontSize: 16 }}>Total: {money(cartTotal)}</strong>
@@ -884,7 +929,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
       )}
 
       {addItemTarget && (
-        <Modal title={`Add Item · ${addItemTarget.tableName}`} onClose={() => setAddItemTarget(null)} width={520}>
+        <Modal title={`Add Item · ${addItemTarget.tableName}`} onClose={() => setAddItemTarget(null)} width={640}>
           <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 12 }}>
             These get added to the same bill. The ticket will reappear on Kitchen/Bar Display so the new item gets prepared.
           </div>
@@ -892,17 +937,22 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
             <Search size={14} style={{ position: "absolute", left: 10, top: 10, color: T.plum, opacity: 0.5 }} />
             <input style={{ ...inputStyle, paddingLeft: 30 }} placeholder="Search menu…" value={addItemSearch} onChange={(e) => setAddItemSearch(e.target.value)} autoFocus />
           </div>
-          <div style={{ maxHeight: 260, overflowY: "auto", border: `1px solid ${T.line}`, borderRadius: 8, marginBottom: 14 }}>
-            {menu.filter((m) => m.available && m.name.toLowerCase().includes(addItemSearch.toLowerCase())).map((m) => (
-              <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderBottom: `1px solid ${T.line}` }}>
-                <div><div style={{ fontSize: 13.5, fontWeight: 600 }}>{m.name}</div><div style={{ fontSize: 11.5, color: T.plum, opacity: 0.7 }}>{money(m.price)}</div></div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <button onClick={() => removeFromAddCart(m)} style={{ border: `1px solid ${T.line}`, background: "#fff", borderRadius: 6, width: 24, height: 24, cursor: "pointer" }}>–</button>
-                  <span style={{ minWidth: 14, textAlign: "center", fontSize: 13 }}>{addCart[m.id] || 0}</span>
-                  <button onClick={() => addToAddCart(m)} style={{ border: "none", background: T.dusk, color: "#fff", borderRadius: 6, width: 24, height: 24, cursor: "pointer" }}>+</button>
+          <div style={{ maxHeight: 320, overflowY: "auto", marginBottom: 14 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+              {menu.filter((m) => m.available && m.name.toLowerCase().includes(addItemSearch.toLowerCase())).map((m) => (
+                <div key={m.id} style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.25 }}>{m.name}</div>
+                    <div style={{ fontSize: 11.5, color: T.gold, marginTop: 2 }}>{money(m.price)}</div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: "auto" }}>
+                    <button onClick={() => removeFromAddCart(m)} style={{ border: `1px solid ${T.line}`, background: "#fff", borderRadius: 6, width: 26, height: 26, cursor: "pointer" }}>–</button>
+                    <span style={{ minWidth: 16, textAlign: "center", fontSize: 13, fontWeight: 600 }}>{addCart[m.id] || 0}</span>
+                    <button onClick={() => addToAddCart(m)} style={{ border: "none", background: T.dusk, color: "#fff", borderRadius: 6, width: 26, height: 26, cursor: "pointer" }}>+</button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <strong style={{ fontFamily: "inherit", fontSize: 16 }}>Adding: {money(addCartTotal)}</strong>
