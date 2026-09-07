@@ -786,13 +786,14 @@ export default function App() {
 }
 
 /* ================= OVERVIEW ================= */
-function Overview({ orders, tables, inventory, expenses, customers }) {
-  const todaysOrders = orders.filter((o) => o.createdAt?.slice(0, 10) === today());
+function Overview({ orders, tables, inventory, expenses, customers, businessDate }) {
+  const refDate = businessDate || today();
+  const todaysOrders = orders.filter((o) => o.createdAt?.slice(0, 10) === refDate);
   const todaysSales = todaysOrders.filter((o) => o.status === "paid").reduce((s, o) => s + o.total, 0);
   const activeOrders = orders.filter((o) => o.status !== "paid" && o.status !== "cancelled").length;
   const occupied = tables.filter((t) => t.status === "occupied").length;
   const lowStock = inventory.filter((i) => i.stock <= i.reorder).length;
-  const todaysExpense = expenses.filter((e) => e.date === today()).reduce((s, e) => s + Number(e.amount), 0);
+  const todaysExpense = expenses.filter((e) => e.date === refDate).reduce((s, e) => s + Number(e.amount), 0);
 
   const stats = [
     { label: "Today's Sales", value: money(todaysSales), icon: TrendingUp, tone: "good" },
@@ -940,6 +941,43 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
       ? { ...o, items: mergedItems, subtotal: newSubtotal, total: newTotal, status: "placed" } // back to "placed" so kitchen/bar sees the new item
       : o)));
     setAddItemTarget(null); setAddCart({}); setAddItemSearch("");
+  };
+
+  // --- Remove Item from an in-progress bill (correcting a mistake without voiding the whole order) ---
+  const [removeItemTarget, setRemoveItemTarget] = useState(null);
+  const [removeDraftItems, setRemoveDraftItems] = useState([]); // working copy while the modal is open
+
+  const openRemoveItem = (order) => {
+    const fresh = orders.find((o) => o.id === order.id) || order;
+    setRemoveItemTarget(fresh);
+    setRemoveDraftItems(fresh.items.map((it) => ({ ...it }))); // clone so edits don't touch live state until confirmed
+  };
+  const decreaseDraftQty = (menuId) => {
+    setRemoveDraftItems((items) => items
+      .map((it) => (it.menuId === menuId ? { ...it, qty: it.qty - 1 } : it))
+      .filter((it) => it.qty > 0));
+  };
+  const increaseDraftQty = (menuId) => {
+    setRemoveDraftItems((items) => items.map((it) => (it.menuId === menuId ? { ...it, qty: it.qty + 1 } : it)));
+  };
+  const dropDraftItem = (menuId) => {
+    setRemoveDraftItems((items) => items.filter((it) => it.menuId !== menuId));
+  };
+  const removeDraftTotal = removeDraftItems.reduce((s, it) => s + it.qty * it.price, 0);
+
+  const confirmRemoveItems = () => {
+    if (!removeItemTarget) return;
+    if (removeDraftItems.length === 0) {
+      alert("Removing every item would leave an empty bill — use Cancel or Void Bill instead if the whole order should go away.");
+      return;
+    }
+    const newSubtotal = removeDraftItems.reduce((s, it) => s + it.qty * it.price, 0);
+    const newDiscount = Math.min(removeItemTarget.discount || 0, newSubtotal); // re-clamp discount so it never exceeds the smaller subtotal
+    const newTotal = Math.max(0, newSubtotal - newDiscount);
+    setOrders(orders.map((o) => (o.id === removeItemTarget.id
+      ? { ...o, items: removeDraftItems, subtotal: newSubtotal, discount: newDiscount, total: newTotal }
+      : o)));
+    setRemoveItemTarget(null); setRemoveDraftItems([]);
   };
 
   // --- Discount ---
@@ -1104,6 +1142,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
                         <div style={{ fontWeight: 700, fontFamily: "inherit", color: T.dusk, marginBottom: 8 }}>{money(o.total)}</div>
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
                           {!["paid", "cancelled"].includes(o.status) && <Btn variant="ghost" onClick={() => openAddItem(o)}><Plus size={14} /> Add Item</Btn>}
+                          {!["paid", "cancelled"].includes(o.status) && o.items.length > 0 && <Btn variant="ghost" onClick={() => openRemoveItem(o)}><Trash2 size={13} /> Remove Item</Btn>}
                           {!["paid", "cancelled"].includes(o.status) && canManageMoney && <Btn variant="ghost" onClick={() => openDiscount(o)}>Discount</Btn>}
                           {nextLabel[o.status] && <Btn variant="gold" onClick={() => advance(o)}>{nextLabel[o.status]}</Btn>}
                           {o.status !== "cancelled" && (o.status !== "paid" || canManageMoney) && <Btn variant="danger" onClick={() => openCancel(o)}>{o.status === "paid" ? "Void Bill" : "Cancel"}</Btn>}
@@ -1223,6 +1262,36 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <strong style={{ fontFamily: "inherit", fontSize: 16 }}>Adding: {money(addCartTotal)}</strong>
             <Btn variant="primary" onClick={confirmAddItems} disabled={addCartTotal === 0}>Add to Bill</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {removeItemTarget && (
+        <Modal title={`Remove Item · ${removeItemTarget.tableName}`} onClose={() => { setRemoveItemTarget(null); setRemoveDraftItems([]); }} width={480}>
+          <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 14 }}>
+            Take an item off this bill without voiding the whole order. If a discount was applied, it's rechecked so it never exceeds the new subtotal.
+          </div>
+          <div style={{ maxHeight: 300, overflowY: "auto", marginBottom: 14 }}>
+            {removeDraftItems.length === 0 ? (
+              <Empty text="No items left — close this and use Cancel or Void Bill instead." />
+            ) : removeDraftItems.map((it) => (
+              <div key={it.menuId} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 4px", borderBottom: `1px solid ${T.line}` }}>
+                <div>
+                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>{it.name}</div>
+                  <div style={{ fontSize: 11.5, color: T.plum, opacity: 0.7 }}>{money(it.price)} each</div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <button onClick={() => decreaseDraftQty(it.menuId)} style={{ border: `1px solid ${T.line}`, background: "#fff", borderRadius: 6, width: 26, height: 26, cursor: "pointer" }}>–</button>
+                  <span style={{ minWidth: 16, textAlign: "center", fontSize: 13, fontWeight: 600 }}>{it.qty}</span>
+                  <button onClick={() => increaseDraftQty(it.menuId)} style={{ border: "none", background: T.dusk, color: "#fff", borderRadius: 6, width: 26, height: 26, cursor: "pointer" }}>+</button>
+                  <button onClick={() => dropDraftItem(it.menuId)} style={{ background: "none", border: "none", cursor: "pointer", color: T.red, marginLeft: 4 }}><Trash2 size={14} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <strong style={{ fontFamily: "inherit", fontSize: 16 }}>New Subtotal: {money(removeDraftTotal)}</strong>
+            <Btn variant="danger" onClick={confirmRemoveItems} disabled={removeDraftItems.length === 0}>Save Changes</Btn>
           </div>
         </Modal>
       )}
