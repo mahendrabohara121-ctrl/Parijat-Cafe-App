@@ -3,7 +3,7 @@ import {
   LayoutDashboard, ClipboardList, LayoutGrid, Package, Wallet, UtensilsCrossed,
   Users, ChefHat, BarChart3, QrCode, ShoppingBag, Gift, Share2, Plus, X, Trash2,
   Check, Clock, Flame, AlertTriangle, TrendingUp, TrendingDown, Search, Menu as MenuIcon, Shield, Eye, EyeOff, LogOut, Truck,
-  CalendarDays, Lock, Unlock, CheckCircle2
+  CalendarDays, Lock, Unlock, CheckCircle2, CreditCard
 } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -77,9 +77,9 @@ const ROLES = [
 ];
 // which modules each role can see. "staff" (Staff Management) is owner-only.
 const ROLE_ACCESS = {
-  owner: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "staff"],
-  manager: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer"],
-  cashier: ["overview", "orders", "tables", "accounting", "crm", "sales", "qr", "online", "loyalty", "refer"],
+  owner: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook", "staff"],
+  manager: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook"],
+  cashier: ["overview", "orders", "tables", "accounting", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook"],
   barista: ["kds", "orders"],
 };
 const SEED_STAFF = [
@@ -108,6 +108,7 @@ const TABLE_MAP = {
       payment_method: o.paymentMethod || null, created_at: o.createdAt, paid_at: o.paidAt || null,
       cancel_reason: o.cancelReason || null, cancelled_from_paid: !!o.cancelledFromPaid,
       subtotal: o.subtotal != null ? o.subtotal : o.total, discount: o.discount || 0,
+      discount_by: o.discountBy || null, voided_by: o.voidedBy || null,
     }),
     fromDb: (r) => ({
       id: r.id, tableId: r.table_id, tableName: r.table_name, items: r.items, total: Number(r.total),
@@ -115,6 +116,7 @@ const TABLE_MAP = {
       paymentMethod: r.payment_method, createdAt: r.created_at, paidAt: r.paid_at,
       cancelReason: r.cancel_reason, cancelledFromPaid: r.cancelled_from_paid,
       subtotal: r.subtotal != null ? Number(r.subtotal) : Number(r.total), discount: Number(r.discount || 0),
+      discountBy: r.discount_by, voidedBy: r.voided_by,
     }),
   },
   inventory: {
@@ -159,6 +161,19 @@ const TABLE_MAP = {
     table: "cash_deposits",
     toDb: (d) => ({ id: d.id, amount: d.amount, notes: d.notes || null, date: d.date }),
     fromDb: (r) => ({ id: r.id, amount: Number(r.amount), notes: r.notes, date: r.date }),
+  },
+  creditTransactions: {
+    table: "credit_transactions",
+    toDb: (c) => ({
+      id: c.id, customer_id: c.customerId || null, customer_name: c.customerName, type: c.type,
+      order_id: c.orderId || null, amount: c.amount, payment_method: c.paymentMethod || null,
+      notes: c.notes || null, date: c.date, created_by: c.createdBy || null,
+    }),
+    fromDb: (r) => ({
+      id: r.id, customerId: r.customer_id, customerName: r.customer_name, type: r.type,
+      orderId: r.order_id, amount: Number(r.amount), paymentMethod: r.payment_method,
+      notes: r.notes, date: r.date, createdBy: r.created_by,
+    }),
   },
 };
 
@@ -493,6 +508,7 @@ export default function App() {
   const [referrals, setReferrals] = useState([]);
   const [purchases, setPurchases] = useState([]);
   const [cashDeposits, setCashDeposits] = useState([]);
+  const [creditTransactions, setCreditTransactions] = useState([]);
   const [staff, setStaff] = useState([]);
   const [businessDate, setBusinessDate] = useState(today());
   const [businessDays, setBusinessDays] = useState({});
@@ -507,7 +523,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const [m, t, o, inv, w, exp, cust, ref, purch, deposits, days] = await Promise.all([
+      const [m, t, o, inv, w, exp, cust, ref, purch, deposits, credit, days] = await Promise.all([
         fetchTable("menu"),
         fetchTable("tables"),
         fetchTable("orders"),
@@ -518,6 +534,7 @@ export default function App() {
         fetchTable("referrals"),
         fetchTable("purchases"),
         fetchTable("cashDeposits"),
+        fetchTable("creditTransactions"),
         fetchBusinessDays(),
       ]);
       // seed empty tables on very first run so the app isn't blank
@@ -531,6 +548,7 @@ export default function App() {
       setReferrals(ref);
       setPurchases(purch);
       setCashDeposits(deposits);
+      setCreditTransactions(credit);
       setBusinessDays(days);
       if (!m.length) syncTable("menu", [], SEED_MENU);
       if (!t.length) syncTable("tables", [], SEED_TABLES);
@@ -570,6 +588,7 @@ export default function App() {
     referrals: (v) => { const prev = referrals; setReferrals(v); syncTable("referrals", prev, v); },
     purchases: (v) => { const prev = purchases; setPurchases(v); syncTable("purchases", prev, v); },
     cashDeposits: (v) => { const prev = cashDeposits; setCashDeposits(v); syncTable("cashDeposits", prev, v); },
+    creditTransactions: (v) => { const prev = creditTransactions; setCreditTransactions(v); syncTable("creditTransactions", prev, v); },
     refreshStaff: async () => {
       const { data } = await supabase.rpc("list_staff");
       setStaff(data || []);
@@ -643,6 +662,7 @@ export default function App() {
     { id: "online", label: "Online Order", icon: ShoppingBag, group: "Grow" },
     { id: "loyalty", label: "Loyalty & Rewards", icon: Gift, group: "Grow" },
     { id: "refer", label: "Refer & Earn", icon: Share2, group: "Grow" },
+    { id: "creditbook", label: "Credit Book", icon: CreditCard, group: "Operate" },
     { id: "staff", label: "Staff & Roles", icon: Shield, group: "Admin" },
   ];
   const groups = ["Main", "Operate", "Grow", "Admin"];
@@ -759,12 +779,12 @@ export default function App() {
             <div style={{ fontSize: 11.5, color: T.plum }}>{currentBusinessDay.status === "open" ? `Opened ${currentBusinessDay.openedAt ? new Date(currentBusinessDay.openedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}` : "POS and operational entries are locked."}</div>
           </div>
           {active === "overview" && <Overview orders={orders} tables={tables} inventory={inventory} expenses={expenses} customers={customers} businessDate={businessDate} />}
-          {active === "orders" && <Orders menu={menu} tables={tables} orders={orders} setOrders={persist.orders} setTables={persist.tables} customers={customers} setCustomers={persist.customers} currentUser={currentUser} businessDay={currentBusinessDay} />}
+          {active === "orders" && <Orders menu={menu} tables={tables} orders={orders} setOrders={persist.orders} setTables={persist.tables} customers={customers} setCustomers={persist.customers} currentUser={currentUser} businessDay={currentBusinessDay} creditTransactions={creditTransactions} setCreditTransactions={persist.creditTransactions} />}
           {active === "kds" && <KDS orders={orders} setOrders={persist.orders} tables={tables} setTables={persist.tables} menu={menu} />}
           {active === "tables" && <TablesView tables={tables} setTables={persist.tables} orders={orders} />}
           {active === "purchase" && <PurchaseManagement purchases={purchases} setPurchases={persist.purchases} inventory={inventory} setInventory={persist.inventory} businessDay={currentBusinessDay} />}
           {active === "inventory" && <Inventory inventory={inventory} setInventory={persist.inventory} waste={waste} setWaste={persist.waste} businessDay={currentBusinessDay} />}
-          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} cashDeposits={cashDeposits} setCashDeposits={persist.cashDeposits} businessDay={currentBusinessDay} />}
+          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} cashDeposits={cashDeposits} setCashDeposits={persist.cashDeposits} businessDay={currentBusinessDay} creditTransactions={creditTransactions} />}
           {active === "menu" && <MenuManagement menu={menu} setMenu={persist.menu} />}
           {active === "crm" && <CRM customers={customers} setCustomers={persist.customers} orders={orders} />}
           {active === "sales" && <SalesReport orders={orders} menu={menu} />}
@@ -772,6 +792,7 @@ export default function App() {
           {active === "online" && <OnlineOrder menu={menu} orders={orders} setOrders={persist.orders} businessDay={currentBusinessDay} />}
           {active === "loyalty" && <Loyalty customers={customers} setCustomers={persist.customers} />}
           {active === "refer" && <ReferEarn customers={customers} referrals={referrals} setReferrals={persist.referrals} setCustomers={persist.customers} />}
+          {active === "creditbook" && <CreditBook customers={customers} creditTransactions={creditTransactions} setCreditTransactions={persist.creditTransactions} currentUser={currentUser} businessDay={currentBusinessDay} />}
           {active === "staff" && <StaffManagement staff={staff} refreshStaff={persist.refreshStaff} currentUser={currentUser} />}
         </div>
       </div>
@@ -881,7 +902,7 @@ const PAYMENT_METHODS = [
   { id: "credit", label: "Credit" },
 ];
 
-function Orders({ menu, tables, orders, setOrders, setTables, customers, setCustomers, currentUser, businessDay }) {
+function Orders({ menu, tables, orders, setOrders, setTables, customers, setCustomers, currentUser, businessDay, creditTransactions, setCreditTransactions }) {
   const canManageMoney = currentUser && (currentUser.role === "owner" || currentUser.role === "manager"); // Discount & Void Bill are Owner/Manager only
   const [modal, setModal] = useState(false);
   const [tableId, setTableId] = useState("");
@@ -989,7 +1010,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     if (discountType === "percent") discountAmt = Math.round(subtotal * (discountAmt / 100));
     discountAmt = Math.min(Math.max(0, discountAmt), subtotal); // clamp between 0 and subtotal
     const newTotal = subtotal - discountAmt;
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, subtotal, discount: discountAmt, total: newTotal } : o)));
+    setOrders(orders.map((o) => (o.id === order.id ? { ...o, subtotal, discount: discountAmt, total: newTotal, discountBy: currentUser?.name || "Unknown" } : o)));
     setDiscountTarget(null);
   };
 
@@ -1001,17 +1022,57 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: next } : o)));
   };
 
-  const settlePayment = (order, method) => {
+  const [creditStep, setCreditStep] = useState(null); // order awaiting a customer to attach the credit sale to
+  const [creditCustomerId, setCreditCustomerId] = useState("");
+  const [creditNewName, setCreditNewName] = useState("");
+  const [creditNewPhone, setCreditNewPhone] = useState("");
+  const [creditMode, setCreditMode] = useState("existing"); // "existing" CRM customer or "new" one entered on the spot
+
+  const settlePayment = (order, method, customerOverride) => {
     if (businessDay.status !== "open") { alert("Business Day is closed. Reopen it before taking payment."); return; }
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "paid", paymentMethod: method, paidAt: new Date().toISOString() } : o)));
+    if (method === "credit") { setCreditStep(order); setCreditCustomerId(""); setCreditNewName(""); setCreditNewPhone(""); setCreditMode("existing"); return; } // needs a customer first
+    finalizeSettlement(order, method, customerOverride);
+  };
+
+  const finalizeSettlement = (order, method, customerNameOverride) => {
+    const finalCustomerName = customerNameOverride || order.customerName;
+    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "paid", paymentMethod: method, paidAt: new Date().toISOString(), customerName: finalCustomerName || o.customerName } : o)));
     setTables(tables.map((t) => (t.id === order.tableId ? { ...t, status: "free", orderId: null } : t)));
     // loyalty points: 1 point per Rs 100
-    const cust = customers.find((c) => c.name === order.customerName);
+    const cust = customers.find((c) => c.name === finalCustomerName);
     if (cust) {
       setCustomers(customers.map((c) => c.id === cust.id ? { ...c, points: c.points + Math.floor(order.total / 100), visits: c.visits + 1 } : c));
     }
     setPayOrder(null);
   };
+
+  const confirmCreditSale = () => {
+    const order = creditStep;
+    let customerId = creditCustomerId;
+    let customerName = "";
+    let updatedCustomers = customers;
+
+    if (creditMode === "existing") {
+      const cust = customers.find((c) => c.id === creditCustomerId);
+      if (!cust) { alert("Select a customer to attach this credit sale to."); return; }
+      customerName = cust.name;
+    } else {
+      if (!creditNewName.trim()) { alert("Enter the customer's name."); return; }
+      const newCust = { id: uid(), name: creditNewName.trim(), phone: creditNewPhone.trim(), notes: "", visits: 0, points: 0, referralCode: creditNewName.replace(/\s/g, "").slice(0, 6).toUpperCase() + Math.floor(Math.random() * 90 + 10) };
+      updatedCustomers = [...customers, newCust];
+      setCustomers(updatedCustomers);
+      customerId = newCust.id;
+      customerName = newCust.name;
+    }
+
+    finalizeSettlement(order, "credit", customerName);
+    setCreditTransactions([...creditTransactions, {
+      id: uid(), customerId, customerName, type: "sale", orderId: order.id,
+      amount: order.total, date: today(), createdBy: currentUser?.name || "Unknown",
+    }]);
+    setCreditStep(null);
+  };
+
   const cancelOrder = (order) => {
     setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "cancelled" } : o)));
     setTables(tables.map((t) => (t.id === order.tableId ? { ...t, status: "free", orderId: null } : t)));
@@ -1030,13 +1091,17 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
   const confirmVoid = () => {
     if (!voidReason.trim()) return;
     const order = voidTarget;
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "cancelled", cancelReason: voidReason.trim(), cancelledFromPaid: true } : o)));
+    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "cancelled", cancelReason: voidReason.trim(), cancelledFromPaid: true, voidedBy: currentUser?.name || "Unknown" } : o)));
     // reverse any loyalty points/visit that were credited when it was paid
     const cust = customers.find((c) => c.name === order.customerName);
     if (cust) {
       setCustomers(customers.map((c) => c.id === cust.id
         ? { ...c, points: Math.max(0, c.points - Math.floor(order.total / 100)), visits: Math.max(0, c.visits - 1) }
         : c));
+    }
+    // if this bill was on credit, remove the credit sale record too — the customer no longer owes it
+    if (order.paymentMethod === "credit") {
+      setCreditTransactions(creditTransactions.filter((c) => !(c.orderId === order.id && c.type === "sale")));
     }
     setVoidTarget(null);
   };
@@ -1133,10 +1198,10 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
                         </div>
                         {o.discount > 0 && (
                           <div style={{ fontSize: 12, color: T.plum, opacity: 0.75, marginTop: 4 }}>
-                            Subtotal {money(o.subtotal != null ? o.subtotal : o.total)} · Discount −{money(o.discount)}
+                            Subtotal {money(o.subtotal != null ? o.subtotal : o.total)} · Discount −{money(o.discount)}{o.discountBy && ` (by ${o.discountBy})`}
                           </div>
                         )}
-                        {o.cancelReason && <div style={{ fontSize: 12, color: T.red, marginTop: 4 }}>Reason: {o.cancelReason}</div>}
+                        {o.cancelReason && <div style={{ fontSize: 12, color: T.red, marginTop: 4 }}>Reason: {o.cancelReason}{o.voidedBy && ` — voided by ${o.voidedBy}`}</div>}
                       </div>
                       <div style={{ textAlign: "right" }}>
                         <div style={{ fontWeight: 700, fontFamily: "inherit", color: T.dusk, marginBottom: 8 }}>{money(o.total)}</div>
@@ -1212,6 +1277,32 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
               </button>
             ))}
           </div>
+        </Modal>
+      )}
+
+      {creditStep && (
+        <Modal title={`Credit Sale · ${creditStep.tableName} · ${money(creditStep.total)}`} onClose={() => setCreditStep(null)} width={440}>
+          <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 14 }}>
+            This amount goes on the customer's tab instead of being collected now. It'll show up in the Credit Book until they pay it back.
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <Btn variant={creditMode === "existing" ? "gold" : "ghost"} onClick={() => setCreditMode("existing")} style={{ flex: 1, justifyContent: "center" }}>Existing customer</Btn>
+            <Btn variant={creditMode === "new" ? "gold" : "ghost"} onClick={() => setCreditMode("new")} style={{ flex: 1, justifyContent: "center" }}>New customer</Btn>
+          </div>
+          {creditMode === "existing" ? (
+            <Field label="Customer">
+              <select style={inputStyle} value={creditCustomerId} onChange={(e) => setCreditCustomerId(e.target.value)}>
+                <option value="">Select customer</option>
+                {customers.map((c) => <option key={c.id} value={c.id}>{c.name}{c.phone ? ` (${c.phone})` : ""}</option>)}
+              </select>
+            </Field>
+          ) : (
+            <>
+              <Field label="Customer Name"><input autoFocus style={inputStyle} value={creditNewName} onChange={(e) => setCreditNewName(e.target.value)} /></Field>
+              <Field label="Phone"><input style={inputStyle} value={creditNewPhone} onChange={(e) => setCreditNewPhone(e.target.value)} placeholder="Optional" /></Field>
+            </>
+          )}
+          <Btn variant="primary" onClick={confirmCreditSale} style={{ width: "100%", justifyContent: "center" }}>Confirm Credit Sale</Btn>
         </Modal>
       )}
 
@@ -1566,7 +1657,7 @@ function Inventory({ inventory, setInventory, waste, setWaste, businessDay }) {
 }
 
 /* ================= ACCOUNTING ================= */
-function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, setCashDeposits, businessDay }) {
+function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, setCashDeposits, businessDay, creditTransactions }) {
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState({ category: "Ingredients", description: "", amount: "", paymentMethod: "cash" });
   const [depositModal, setDepositModal] = useState(false);
@@ -1596,10 +1687,16 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
   const removeDeposit = (id) => setCashDeposits(cashDeposits.filter((d) => d.id !== id));
 
   const paidOrders = orders.filter((o) => o.status === "paid");
+  const creditRepayments = (creditTransactions || []).filter((c) => c.type === "repayment");
+  const creditOutstanding = (creditTransactions || []).reduce((s, c) => s + (c.type === "sale" ? c.amount : -c.amount), 0);
 
-  // full cash/bank reconciliation: money IN from paid orders, money OUT from expenses + purchases, per payment method
-  const methodBreakdown = PAYMENT_METHODS.map((p) => {
-    const moneyIn = paidOrders.filter((o) => o.paymentMethod === p.id).reduce((s, o) => s + o.total, 0);
+  // full cash/bank reconciliation: money IN from paid orders (excluding Credit sales, which aren't real
+  // money until repaid), plus money IN from credit repayments (via whichever method they were actually
+  // paid back through), money OUT from expenses + purchases, all grouped per payment method
+  const methodBreakdown = PAYMENT_METHODS.filter((p) => p.id !== "credit").map((p) => {
+    const moneyInFromOrders = paidOrders.filter((o) => o.paymentMethod === p.id).reduce((s, o) => s + o.total, 0);
+    const moneyInFromRepayments = creditRepayments.filter((c) => c.paymentMethod === p.id).reduce((s, c) => s + c.amount, 0);
+    const moneyIn = moneyInFromOrders + moneyInFromRepayments;
     const expenseOut = expenses.filter((e) => e.paymentMethod === p.id).reduce((s, e) => s + Number(e.amount), 0);
     const purchaseOut = purchases.filter((pu) => pu.paymentMethod === p.id).reduce((s, pu) => s + Number(pu.totalCost), 0);
     return { ...p, in: moneyIn, out: expenseOut + purchaseOut, net: moneyIn - expenseOut - purchaseOut };
@@ -1615,15 +1712,20 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
     const scopedExpenses = scoped(expenses);
     const scopedPurchases = scoped(purchases);
     const scopedDeposits = scoped(cashDeposits);
+    const scopedRepayments = scoped(creditRepayments);
 
     const rev = scopedOrders.reduce((s, o) => s + o.total, 0);
     const exp = scopedExpenses.reduce((s, e) => s + Number(e.amount), 0);
     const pur = scopedPurchases.reduce((s, p) => s + Number(p.totalCost), 0);
     const dep = scopedDeposits.reduce((s, d) => s + Number(d.amount), 0);
-    const cashIn = scopedOrders.filter((o) => o.paymentMethod === "cash").reduce((s, o) => s + o.total, 0);
+    // credit-paid orders are excluded from cash/bank movement — that money hasn't actually arrived yet;
+    // repayments count as real money in, via whichever method they were paid back through
+    const cashIn = scopedOrders.filter((o) => o.paymentMethod === "cash").reduce((s, o) => s + o.total, 0)
+      + scopedRepayments.filter((c) => c.paymentMethod === "cash").reduce((s, c) => s + c.amount, 0);
     const cashOut = scopedExpenses.filter((e) => e.paymentMethod === "cash").reduce((s, e) => s + Number(e.amount), 0)
       + scopedPurchases.filter((p) => p.paymentMethod === "cash").reduce((s, p) => s + Number(p.totalCost), 0);
-    const bankIn = scopedOrders.filter((o) => o.paymentMethod !== "cash").reduce((s, o) => s + o.total, 0);
+    const bankIn = scopedOrders.filter((o) => o.paymentMethod !== "cash" && o.paymentMethod !== "credit").reduce((s, o) => s + o.total, 0)
+      + scopedRepayments.filter((c) => c.paymentMethod !== "cash").reduce((s, c) => s + c.amount, 0);
     const bankOut = scopedExpenses.filter((e) => e.paymentMethod !== "cash").reduce((s, e) => s + Number(e.amount), 0)
       + scopedPurchases.filter((p) => p.paymentMethod !== "cash").reduce((s, p) => s + Number(p.totalCost), 0);
 
@@ -1638,6 +1740,7 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
       { Metric: "Cash Movement — Out (Rs)", Value: cashOut },
       { Metric: "Bank Movement — In (Rs)", Value: bankIn },
       { Metric: "Bank Movement — Out (Rs)", Value: bankOut },
+      { Metric: "Credit Outstanding right now (Rs)", Value: creditOutstanding },
     ];
     if (scope === "all") {
       summarySheet.push({ Metric: "Cash in Hand right now (Rs)", Value: cashBalance });
@@ -1670,6 +1773,7 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
         <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Expenses</div><div style={{ fontSize: 22, fontWeight: 700, color: T.red, fontFamily: "inherit" }}>{money(totalExpense)}</div></Card>
         <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Purchases</div><div style={{ fontSize: 22, fontWeight: 700, color: T.red, fontFamily: "inherit" }}>{money(totalPurchaseSpend)}</div></Card>
         <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Net Profit</div><div style={{ fontSize: 22, fontWeight: 700, color: T.dusk, fontFamily: "inherit" }}>{money(profit)}</div></Card>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Credit Outstanding</div><div style={{ fontSize: 22, fontWeight: 700, color: creditOutstanding > 0 ? T.red : T.dusk, fontFamily: "inherit" }}>{money(creditOutstanding)}</div></Card>
       </div>
 
       <Card style={{ padding: 18, marginBottom: 20 }}>
@@ -2256,7 +2360,393 @@ function ReferEarn({ customers, referrals, setReferrals, setCustomers }) {
   );
 }
 
-/* ================= STAFF & ROLES ================= */
+/* ================= CREDIT BOOK ================= */
+function CreditBook({ customers, creditTransactions, setCreditTransactions, currentUser, businessDay }) {
+  const [repayModal, setRepayModal] = useState(false);
+  const [repayCustomerId, setRepayCustomerId] = useState("");
+  const [repayAmount, setRepayAmount] = useState("");
+  const [repayMethod, setRepayMethod] = useState("cash");
+  const [repayNotes, setRepayNotes] = useState("");
+  const [expandedCustomer, setExpandedCustomer] = useState(null);
+
+  const balances = useMemo(() => {
+    const map = {};
+    creditTransactions.forEach((c) => {
+      if (!map[c.customerId]) map[c.customerId] = { customerId: c.customerId, customerName: c.customerName, sales: 0, repayments: 0 };
+      if (c.type === "sale") map[c.customerId].sales += c.amount;
+      else map[c.customerId].repayments += c.amount;
+    });
+    return Object.values(map).map((b) => ({ ...b, balance: b.sales - b.repayments })).sort((a, b) => b.balance - a.balance);
+  }, [creditTransactions]);
+
+  const totalOutstanding = balances.reduce((s, b) => s + Math.max(0, b.balance), 0);
+
+  const openRepay = (customerId) => {
+    setRepayCustomerId(customerId || ""); setRepayAmount(""); setRepayMethod("cash"); setRepayNotes("");
+    setRepayModal(true);
+  };
+
+  const confirmRepay = () => {
+    if (businessDay.status !== "open") { alert("Business Day is closed. Open it before logging a repayment."); return; }
+    const bal = balances.find((b) => b.customerId === repayCustomerId);
+    if (!bal) { alert("Select a customer."); return; }
+    if (!repayAmount || Number(repayAmount) <= 0) { alert("Enter a valid amount."); return; }
+    setCreditTransactions([...creditTransactions, {
+      id: uid(), customerId: repayCustomerId, customerName: bal.customerName, type: "repayment",
+      amount: Number(repayAmount), paymentMethod: repayMethod, notes: repayNotes, date: today(), createdBy: currentUser?.name || "Unknown",
+    }]);
+    setRepayModal(false);
+  };
+
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const balanceSheet = balances.map((b) => ({ Customer: b.customerName, "Total Credit Sales (Rs)": b.sales, "Total Repaid (Rs)": b.repayments, "Outstanding (Rs)": b.balance }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(balanceSheet), "Balances");
+    const txSheet = creditTransactions.slice().reverse().map((c) => ({
+      Date: c.date, Customer: c.customerName, Type: c.type === "sale" ? "Credit Sale" : "Repayment",
+      "Amount (Rs)": c.amount, "Paid Via": c.paymentMethod ? (PAYMENT_METHODS.find((p) => p.id === c.paymentMethod)?.label || c.paymentMethod) : "",
+      Notes: c.notes, By: c.createdBy,
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(txSheet), "Transactions");
+    XLSX.writeFile(wb, `parijat-cafe-credit-book-${today()}.xlsx`);
+  };
+
+  return (
+    <div>
+      <Card style={{ padding: 18, marginBottom: 20 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Outstanding Credit</div>
+            <div style={{ fontSize: 26, fontWeight: 700, color: totalOutstanding > 0 ? T.red : "#15803D" }}>{money(totalOutstanding)}</div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <Btn variant="ghost" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+            <Btn variant="primary" onClick={() => openRepay("")}><Plus size={15} /> Log Repayment</Btn>
+          </div>
+        </div>
+      </Card>
+
+      <Card style={{ padding: 0, overflow: "hidden", marginBottom: 20 }}>
+        {balances.length === 0 ? <Empty text="No credit sales yet. Settling a bill as 'Credit' in Order & KOT will show up here." /> : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+            <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}>
+              <th style={{ padding: "10px 14px" }}>Customer</th><th>Total Sold on Credit</th><th>Repaid</th><th>Outstanding</th><th></th>
+            </tr></thead>
+            <tbody>
+              {balances.map((b) => (
+                <tr key={b.customerId} style={{ borderTop: `1px solid ${T.line}` }}>
+                  <td style={{ padding: "10px 14px", fontWeight: 600 }}>{b.customerName}</td>
+                  <td>{money(b.sales)}</td>
+                  <td>{money(b.repayments)}</td>
+                  <td style={{ fontWeight: 700, color: b.balance > 0 ? T.red : "#15803D" }}>{money(b.balance)}</td>
+                  <td>
+                    <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                      <button onClick={() => setExpandedCustomer(expandedCustomer === b.customerId ? null : b.customerId)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.plum }}>{expandedCustomer === b.customerId ? "Hide" : "History"}</button>
+                      {b.balance > 0 && <button onClick={() => openRepay(b.customerId)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.gold, fontWeight: 600 }}>Log Repayment</button>}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {expandedCustomer && (
+        <Card style={{ padding: 18 }}>
+          <h3 style={{ fontSize: 14, color: T.dusk, marginBottom: 12 }}>Transaction History — {balances.find((b) => b.customerId === expandedCustomer)?.customerName}</h3>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead><tr style={{ textAlign: "left", color: T.plum, opacity: 0.65, fontSize: 11, textTransform: "uppercase" }}>
+              <th style={{ padding: "6px 4px" }}>Date</th><th>Type</th><th>Amount</th><th>Paid Via</th><th>Notes</th>
+            </tr></thead>
+            <tbody>
+              {creditTransactions.filter((c) => c.customerId === expandedCustomer).slice().reverse().map((c) => (
+                <tr key={c.id} style={{ borderTop: `1px solid ${T.line}` }}>
+                  <td style={{ padding: "8px 4px", opacity: 0.7 }}>{c.date}</td>
+                  <td><Pill tone={c.type === "sale" ? "bad" : "good"}>{c.type === "sale" ? "Credit Sale" : "Repayment"}</Pill></td>
+                  <td>{money(c.amount)}</td>
+                  <td>{c.paymentMethod ? (PAYMENT_METHODS.find((p) => p.id === c.paymentMethod)?.label || c.paymentMethod) : "—"}</td>
+                  <td style={{ opacity: 0.75 }}>{c.notes || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
+      {repayModal && (
+        <Modal title="Log Repayment" onClose={() => setRepayModal(false)}>
+          <Field label="Customer">
+            <select style={inputStyle} value={repayCustomerId} onChange={(e) => setRepayCustomerId(e.target.value)}>
+              <option value="">Select customer</option>
+              {balances.filter((b) => b.balance > 0).map((b) => <option key={b.customerId} value={b.customerId}>{b.customerName} (owes {money(b.balance)})</option>)}
+            </select>
+          </Field>
+          <Field label="Amount Received (Rs)"><input type="number" style={inputStyle} value={repayAmount} onChange={(e) => setRepayAmount(e.target.value)} /></Field>
+          <Field label="Received Via">
+            <select style={inputStyle} value={repayMethod} onChange={(e) => setRepayMethod(e.target.value)}>
+              {PAYMENT_METHODS.filter((p) => p.id !== "credit").map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
+          </Field>
+          <Field label="Notes"><input style={inputStyle} value={repayNotes} onChange={(e) => setRepayNotes(e.target.value)} placeholder="Optional" /></Field>
+          <Btn variant="primary" onClick={confirmRepay} style={{ width: "100%", justifyContent: "center" }}>Log Repayment</Btn>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ================= CREDIT BOOK ================= */
+function CreditBook({ customers, creditTransactions, setCreditTransactions, currentUser, businessDay }) {
+  const [repayTarget, setRepayTarget] = useState(null); // customer being repaid
+  const [repayAmount, setRepayAmount] = useState("");
+  const [repayMethod, setRepayMethod] = useState("cash");
+  const [repayNotes, setRepayNotes] = useState("");
+  const [historyTarget, setHistoryTarget] = useState(null); // customer whose transaction log is being viewed
+
+  const accounts = useMemo(() => {
+    return customers.map((c) => {
+      const txns = creditTransactions.filter((t) => t.customerId === c.id);
+      const sales = txns.filter((t) => t.type === "sale").reduce((s, t) => s + t.amount, 0);
+      const repayments = txns.filter((t) => t.type === "repayment").reduce((s, t) => s + t.amount, 0);
+      return { ...c, creditSales: sales, creditRepayments: repayments, balance: sales - repayments, txns };
+    }).filter((c) => c.creditSales > 0 || c.creditRepayments > 0)
+      .sort((a, b) => b.balance - a.balance);
+  }, [customers, creditTransactions]);
+
+  const totalOutstanding = accounts.reduce((s, c) => s + c.balance, 0);
+  const totalExtended = accounts.reduce((s, c) => s + c.creditSales, 0);
+  const totalRepaid = accounts.reduce((s, c) => s + c.creditRepayments, 0);
+
+  const openRepay = (cust) => { setRepayTarget(cust); setRepayAmount(cust.balance > 0 ? String(cust.balance) : ""); setRepayMethod("cash"); setRepayNotes(""); };
+  const confirmRepay = () => {
+    if (businessDay.status !== "open") { alert("Business Day is closed. Open it before recording a repayment."); return; }
+    const amount = Number(repayAmount);
+    if (!amount || amount <= 0) return;
+    setCreditTransactions([...creditTransactions, {
+      id: uid(), customerId: repayTarget.id, customerName: repayTarget.name, type: "repayment", orderId: null,
+      amount, paymentMethod: repayMethod, notes: repayNotes, date: today(), createdBy: currentUser?.name || "Unknown",
+    }]);
+    setRepayTarget(null);
+  };
+
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const balanceSheet = accounts.map((c) => ({ Customer: c.name, Phone: c.phone, "Total Credit Extended (Rs)": c.creditSales, "Total Repaid (Rs)": c.creditRepayments, "Outstanding (Rs)": c.balance }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(balanceSheet), "Balances");
+    const txnSheet = creditTransactions.slice().sort((a, b) => new Date(a.date) - new Date(b.date)).map((t) => ({
+      Date: t.date, Customer: t.customerName, Type: t.type === "sale" ? "Credit Sale" : "Repayment",
+      "Amount (Rs)": t.amount, "Paid Via": t.paymentMethod ? (PAYMENT_METHODS.find((p) => p.id === t.paymentMethod)?.label || t.paymentMethod) : "", Notes: t.notes, "Logged By": t.createdBy,
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(txnSheet), "Transactions");
+    XLSX.writeFile(wb, `parijat-cafe-credit-book-${today()}.xlsx`);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 14, marginBottom: 20 }}>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Outstanding Now</div><div style={{ fontSize: 22, fontWeight: 700, color: T.red, fontFamily: "inherit" }}>{money(totalOutstanding)}</div></Card>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Ever Extended</div><div style={{ fontSize: 22, fontWeight: 700, color: T.dusk, fontFamily: "inherit" }}>{money(totalExtended)}</div></Card>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Repaid</div><div style={{ fontSize: 22, fontWeight: 700, color: "#15803D", fontFamily: "inherit" }}>{money(totalRepaid)}</div></Card>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+        <Btn variant="ghost" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+      </div>
+
+      {accounts.length === 0 ? (
+        <Card style={{ padding: 30 }}><Empty text="No credit sales yet. When a bill is settled with 'Credit' as the payment method, it shows up here." /></Card>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(270px,1fr))", gap: 12 }}>
+          {accounts.map((c) => (
+            <Card key={c.id} style={{ padding: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontFamily: "inherit", color: T.dusk }}>{c.name}</div>
+                  <div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>{c.phone}</div>
+                </div>
+                <Pill tone={c.balance > 0 ? "bad" : "good"}>{c.balance > 0 ? "Owing" : "Settled"}</Pill>
+              </div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: c.balance > 0 ? T.red : "#15803D", marginBottom: 10 }}>{money(c.balance)}</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <Btn variant="ghost" onClick={() => setHistoryTarget(c)} style={{ flex: 1, justifyContent: "center", fontSize: 12 }}>History</Btn>
+                {c.balance > 0 && <Btn variant="primary" onClick={() => openRepay(c)} style={{ flex: 1, justifyContent: "center", fontSize: 12 }}>Log Repayment</Btn>}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {repayTarget && (
+        <Modal title={`Log Repayment · ${repayTarget.name}`} onClose={() => setRepayTarget(null)} width={400}>
+          <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 14 }}>Current balance owed: <strong>{money(repayTarget.balance)}</strong></div>
+          <Field label="Amount Repaid (Rs)"><input autoFocus type="number" style={inputStyle} value={repayAmount} onChange={(e) => setRepayAmount(e.target.value)} /></Field>
+          <Field label="Received Via">
+            <select style={inputStyle} value={repayMethod} onChange={(e) => setRepayMethod(e.target.value)}>
+              {PAYMENT_METHODS.filter((p) => p.id !== "credit").map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
+          </Field>
+          <Field label="Notes"><input style={inputStyle} value={repayNotes} onChange={(e) => setRepayNotes(e.target.value)} placeholder="Optional" /></Field>
+          <Btn variant="primary" onClick={confirmRepay} style={{ width: "100%", justifyContent: "center" }}>Log Repayment</Btn>
+        </Modal>
+      )}
+
+      {historyTarget && (
+        <Modal title={`Credit History · ${historyTarget.name}`} onClose={() => setHistoryTarget(null)} width={480}>
+          {historyTarget.txns.length === 0 ? <Empty text="No transactions yet." /> : (
+            <div style={{ maxHeight: 400, overflowY: "auto" }}>
+              {historyTarget.txns.slice().sort((a, b) => new Date(b.date) - new Date(a.date)).map((t) => (
+                <div key={t.id} style={{ display: "flex", justifyContent: "space-between", padding: "10px 4px", borderBottom: `1px solid ${T.line}` }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: t.type === "sale" ? T.red : "#15803D" }}>{t.type === "sale" ? "Credit Sale" : "Repayment"}</div>
+                    <div style={{ fontSize: 11.5, color: T.plum, opacity: 0.7 }}>{t.date}{t.paymentMethod ? ` · ${PAYMENT_METHODS.find((p) => p.id === t.paymentMethod)?.label || t.paymentMethod}` : ""}{t.notes ? ` · ${t.notes}` : ""}</div>
+                  </div>
+                  <div style={{ fontWeight: 700, color: t.type === "sale" ? T.red : "#15803D" }}>{t.type === "sale" ? "+" : "−"}{money(t.amount)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ================= CREDIT BOOK ================= */
+function CreditBook({ customers, creditTransactions, setCreditTransactions, currentUser, businessDay }) {
+  const [repayTarget, setRepayTarget] = useState(null); // customerId being repaid
+  const [repayAmount, setRepayAmount] = useState("");
+  const [repayMethod, setRepayMethod] = useState("cash");
+  const [repayNotes, setRepayNotes] = useState("");
+  const [historyFor, setHistoryFor] = useState(null); // customerId whose full history is expanded
+
+  const balances = useMemo(() => {
+    const map = {};
+    creditTransactions.forEach((c) => {
+      if (!map[c.customerId]) map[c.customerId] = { customerId: c.customerId, customerName: c.customerName, sales: 0, repayments: 0 };
+      if (c.type === "sale") map[c.customerId].sales += c.amount;
+      else map[c.customerId].repayments += c.amount;
+    });
+    return Object.values(map)
+      .map((b) => ({ ...b, outstanding: b.sales - b.repayments }))
+      .sort((a, b) => b.outstanding - a.outstanding);
+  }, [creditTransactions]);
+
+  const totalOutstanding = balances.reduce((s, b) => s + b.outstanding, 0);
+  const totalExtended = balances.reduce((s, b) => s + b.sales, 0);
+  const totalRepaid = balances.reduce((s, b) => s + b.repayments, 0);
+
+  const openRepay = (customerId) => { setRepayTarget(customerId); setRepayAmount(""); setRepayMethod("cash"); setRepayNotes(""); };
+
+  const confirmRepay = () => {
+    if (businessDay.status !== "open") { alert("Business Day is closed. Open it before logging a repayment."); return; }
+    const bal = balances.find((b) => b.customerId === repayTarget);
+    const amount = Number(repayAmount);
+    if (!bal || !amount || amount <= 0) return;
+    if (amount > bal.outstanding) { alert(`That's more than they owe (${money(bal.outstanding)}). Enter an amount up to that.`); return; }
+    setCreditTransactions([...creditTransactions, {
+      id: uid(), customerId: bal.customerId, customerName: bal.customerName, type: "repayment",
+      amount, paymentMethod: repayMethod, notes: repayNotes, date: today(), createdBy: currentUser?.name || "Unknown",
+    }]);
+    setRepayTarget(null);
+  };
+
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const balanceSheet = balances.map((b) => ({ Customer: b.customerName, "Total Extended (Rs)": b.sales, "Total Repaid (Rs)": b.repayments, "Outstanding (Rs)": b.outstanding }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(balanceSheet), "Balances");
+    const txSheet = creditTransactions.slice().reverse().map((c) => ({
+      Date: c.date, Customer: c.customerName, Type: c.type === "sale" ? "Credit Sale" : "Repayment",
+      "Amount (Rs)": c.amount, "Paid Via": c.paymentMethod ? (PAYMENT_METHODS.find((p) => p.id === c.paymentMethod)?.label || c.paymentMethod) : "",
+      Notes: c.notes || "", "Logged By": c.createdBy || "",
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(txSheet), "Transactions");
+    XLSX.writeFile(wb, `parijat-cafe-credit-book-${today()}.xlsx`);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 14, marginBottom: 20 }}>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Outstanding</div><div style={{ fontSize: 22, fontWeight: 700, color: T.red, fontFamily: "inherit" }}>{money(totalOutstanding)}</div></Card>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Ever Extended</div><div style={{ fontSize: 22, fontWeight: 700, color: T.dusk, fontFamily: "inherit" }}>{money(totalExtended)}</div></Card>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Repaid</div><div style={{ fontSize: 22, fontWeight: 700, color: "#15803D", fontFamily: "inherit" }}>{money(totalRepaid)}</div></Card>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+        <Btn variant="ghost" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+      </div>
+
+      <h3 style={{ fontFamily: "inherit", fontSize: 16, color: T.dusk, marginBottom: 12 }}>Customer Balances</h3>
+      <Card style={{ padding: 0, overflow: "hidden", marginBottom: 24 }}>
+        {balances.length === 0 ? <Empty text="No credit sales yet. Choose 'Credit' as a payment method on a bill to start a tab." /> : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+            <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}>
+              <th style={{ padding: "10px 14px" }}>Customer</th><th>Extended</th><th>Repaid</th><th>Outstanding</th><th></th>
+            </tr></thead>
+            <tbody>
+              {balances.map((b) => (
+                <React.Fragment key={b.customerId}>
+                  <tr style={{ borderTop: `1px solid ${T.line}` }}>
+                    <td style={{ padding: "10px 14px", fontWeight: 600 }}>{b.customerName}</td>
+                    <td>{money(b.sales)}</td>
+                    <td>{money(b.repayments)}</td>
+                    <td><Pill tone={b.outstanding > 0 ? "bad" : "good"}>{money(b.outstanding)}</Pill></td>
+                    <td>
+                      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                        <button onClick={() => setHistoryFor(historyFor === b.customerId ? null : b.customerId)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.plum }}>{historyFor === b.customerId ? "Hide" : "History"}</button>
+                        {b.outstanding > 0 && <Btn variant="gold" onClick={() => openRepay(b.customerId)} style={{ fontSize: 11.5, padding: "5px 10px" }}>Log Repayment</Btn>}
+                      </div>
+                    </td>
+                  </tr>
+                  {historyFor === b.customerId && (
+                    <tr>
+                      <td colSpan={5} style={{ padding: "0 14px 14px", background: T.cream }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, marginTop: 8 }}>
+                          <thead><tr style={{ textAlign: "left", color: T.plum, opacity: 0.65, fontSize: 10.5, textTransform: "uppercase" }}>
+                            <th style={{ padding: "4px 0" }}>Date</th><th>Type</th><th>Amount</th><th>Via</th><th>By</th>
+                          </tr></thead>
+                          <tbody>
+                            {creditTransactions.filter((c) => c.customerId === b.customerId).slice().reverse().map((c) => (
+                              <tr key={c.id} style={{ borderTop: `1px solid ${T.line}` }}>
+                                <td style={{ padding: "5px 0" }}>{c.date}</td>
+                                <td><Pill tone={c.type === "sale" ? "bad" : "good"}>{c.type === "sale" ? "Credit Sale" : "Repayment"}</Pill></td>
+                                <td>{money(c.amount)}</td>
+                                <td>{c.paymentMethod ? (PAYMENT_METHODS.find((p) => p.id === c.paymentMethod)?.label || c.paymentMethod) : "—"}</td>
+                                <td style={{ opacity: 0.7 }}>{c.createdBy || "—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {repayTarget && (
+        <Modal title={`Log Repayment · ${balances.find((b) => b.customerId === repayTarget)?.customerName}`} onClose={() => setRepayTarget(null)} width={420}>
+          <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 14 }}>
+            Currently owes {money(balances.find((b) => b.customerId === repayTarget)?.outstanding || 0)}. This repayment counts as real money in, through whichever method you pick below.
+          </div>
+          <Field label="Amount Received (Rs)"><input autoFocus type="number" style={inputStyle} value={repayAmount} onChange={(e) => setRepayAmount(e.target.value)} /></Field>
+          <Field label="Received Via">
+            <select style={inputStyle} value={repayMethod} onChange={(e) => setRepayMethod(e.target.value)}>
+              {PAYMENT_METHODS.filter((p) => p.id !== "credit").map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
+          </Field>
+          <Field label="Notes"><input style={inputStyle} value={repayNotes} onChange={(e) => setRepayNotes(e.target.value)} placeholder="Optional" /></Field>
+          <Btn variant="primary" onClick={confirmRepay} style={{ width: "100%", justifyContent: "center" }}>Log Repayment</Btn>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+
 function StaffManagement({ staff, refreshStaff, currentUser }) {
   const [modal, setModal] = useState(false);
   const [editing, setEditing] = useState(null);
