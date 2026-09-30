@@ -75,9 +75,9 @@ const ROLES = [
   { id: "cashier", label: "Cashier" },
   { id: "barista", label: "Barista" },
 ];
-// which modules each role can see. "staff" (Staff Management) is owner-only.
+// which modules each role can see. "staff" (Staff Management) and "auditlog" are owner-only.
 const ROLE_ACCESS = {
-  owner: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook", "staff"],
+  owner: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook", "staff", "auditlog"],
   manager: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook"],
   cashier: ["overview", "orders", "tables", "accounting", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook"],
   barista: ["kds", "orders"],
@@ -192,19 +192,22 @@ async function fetchTable(key) {
 }
 
 // reconcile the whole in-memory array back to Supabase: upsert everything present,
-// delete anything that used to be in oldArr but isn't in newArr anymore
+// delete anything that used to be in oldArr but isn't in newArr anymore.
+// Returns { ok: boolean, error? } instead of swallowing failures, so callers can
+// show the user something went wrong and roll back optimistic state if needed.
 async function syncTable(key, oldArr, newArr) {
   const { table, toDb } = TABLE_MAP[key];
   const newIds = new Set(newArr.map((r) => r.id));
   const toDelete = oldArr.filter((r) => !newIds.has(r.id)).map((r) => r.id);
   if (newArr.length) {
     const { error } = await supabase.from(table).upsert(newArr.map(toDb));
-    if (error) console.error("upsert failed", table, error);
+    if (error) { console.error("upsert failed", table, error); return { ok: false, error }; }
   }
   if (toDelete.length) {
     const { error } = await supabase.from(table).delete().in("id", toDelete);
-    if (error) console.error("delete failed", table, error);
+    if (error) { console.error("delete failed", table, error); return { ok: false, error }; }
   }
+  return { ok: true };
 }
 
 /* ---------------- business days (keyed by date, not id — handled separately from the generic tables above) ---------------- */
@@ -244,7 +247,24 @@ async function saveBusinessDay(day) {
     audit: day.audit || [],
   };
   const { error } = await supabase.from("business_days").upsert(row, { onConflict: "date" });
-  if (error) console.error("save business_day failed", error);
+  if (error) { console.error("save business_day failed", error); return { ok: false, error }; }
+  return { ok: true };
+}
+
+/* ---------------- audit log ---------------- */
+// fire-and-forget: never blocks or breaks the action it's logging, even if the insert fails
+async function logAudit(actor, action, details) {
+  try {
+    const { error } = await supabase.from("audit_log").insert({ actor: actor || "Unknown", action, details: details || null });
+    if (error) console.error("audit log failed", error);
+  } catch (e) {
+    console.error("audit log failed", e);
+  }
+}
+async function fetchAuditLog(limit = 500) {
+  const { data, error } = await supabase.from("audit_log").select("*").order("at", { ascending: false }).limit(limit);
+  if (error) { console.error("fetch audit_log failed", error); return []; }
+  return data;
 }
 
 /* ---------------- small UI atoms ---------------- */
@@ -307,6 +327,30 @@ function Field({ label, children }) {
 }
 const inputStyle = { width: "100%", padding: "9px 11px", border: `1px solid ${T.line}`, borderRadius: 8, fontSize: 13.5, fontFamily: "inherit" };
 
+/* ---------------- toasts (surfaces save/sync failures instead of swallowing them) ---------------- */
+function ToastStack({ toasts, onDismiss }) {
+  if (!toasts.length) return null;
+  const toneStyle = {
+    error: { bg: "#FEE2E2", color: "#991B1B", border: "#FCA5A5" },
+    warn: { bg: "#FEF3C7", color: "#92400E", border: "#FDE68A" },
+    success: { bg: "#DCFCE7", color: "#166534", border: "#BBF7D0" },
+    info: { bg: "#EFF6FF", color: "#1E40AF", border: "#BFDBFE" },
+  };
+  return (
+    <div style={{ position: "fixed", top: 16, right: 16, zIndex: 999, display: "flex", flexDirection: "column", gap: 8, maxWidth: 340 }}>
+      {toasts.map((t) => {
+        const s = toneStyle[t.tone] || toneStyle.info;
+        return (
+          <div key={t.id} style={{ background: s.bg, color: s.color, border: `1px solid ${s.border}`, borderRadius: 10, padding: "10px 12px", fontSize: 12.5, boxShadow: "0 4px 14px rgba(0,0,0,0.08)", display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+            <span style={{ lineHeight: 1.4 }}>{t.message}</span>
+            <button onClick={() => onDismiss(t.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", opacity: 0.6, flexShrink: 0 }}><X size={13} /></button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ================= LOGIN ================= */
 function Login({ staff, onLogin, error }) {
   const [username, setUsername] = useState("");
@@ -348,6 +392,56 @@ function Login({ staff, onLogin, error }) {
         <div style={{ fontSize: 11.5, color: T.plum, opacity: 0.7, background: T.cream, padding: 10, borderRadius: 8, lineHeight: 1.5 }}>
           First time here? Default owner login is <strong>owner</strong> / <strong>owner123</strong>. Sign in and change it (or add real staff) from Staff & Roles.
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ================= FORCE PASSWORD CHANGE ================= */
+function ForcePasswordChange({ currentUser, onDone, onLogout }) {
+  const [pw1, setPw1] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [showPw, setShowPw] = useState(false);
+  const [err, setErr] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    setErr("");
+    if (pw1.length < 6) { setErr("Password must be at least 6 characters."); return; }
+    if (pw1 !== pw2) { setErr("Passwords don't match."); return; }
+    setSaving(true);
+    const { error: pwErr } = await supabase.rpc("update_staff_password", { p_id: currentUser.id, p_password: pw1 });
+    if (pwErr) { setErr("Couldn't set password: " + pwErr.message); setSaving(false); return; }
+    const { error: flagErr } = await supabase.rpc("clear_must_change_password", { p_id: currentUser.id });
+    if (flagErr) { setErr("Password saved, but couldn't clear the reset flag: " + flagErr.message); setSaving(false); return; }
+    logAudit(currentUser.name, "PASSWORD_CHANGED", { self: true });
+    onDone({ ...currentUser, must_change_password: false });
+  };
+
+  return (
+    <div style={{ minHeight: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: T.cream, fontFamily: "'Inter', Arial, sans-serif", padding: 20 }}>
+      <div style={{ background: "#fff", border: `1px solid ${T.line}`, borderRadius: 14, padding: 32, width: 380, maxWidth: "100%" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <Lock size={20} color={T.gold} />
+          <span style={{ fontWeight: 700, fontSize: 17, color: T.dusk }}>Set a New Password</span>
+        </div>
+        <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 22 }}>
+          For security, {currentUser.name} needs to set a fresh password before continuing.
+        </div>
+        <Field label="New Password">
+          <div style={{ position: "relative" }}>
+            <input type={showPw ? "text" : "password"} style={{ ...inputStyle, paddingRight: 36 }} value={pw1} onChange={(e) => setPw1(e.target.value)} autoFocus />
+            <button type="button" onClick={() => setShowPw((s) => !s)} style={{ position: "absolute", right: 8, top: 7, background: "none", border: "none", cursor: "pointer", color: T.plum }}>
+              {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          </div>
+        </Field>
+        <Field label="Confirm New Password">
+          <input type={showPw ? "text" : "password"} style={inputStyle} value={pw2} onChange={(e) => setPw2(e.target.value)} />
+        </Field>
+        {err && <div style={{ fontSize: 12.5, color: T.red, background: "#FEE2E2", padding: "8px 10px", borderRadius: 8, marginBottom: 14 }}>{err}</div>}
+        <Btn onClick={submit} variant="primary" disabled={saving} style={{ width: "100%", justifyContent: "center", marginBottom: 10 }}>{saving ? "Saving…" : "Set Password & Continue"}</Btn>
+        <button onClick={onLogout} style={{ background: "none", border: "none", color: T.plum, cursor: "pointer", fontSize: 12, width: "100%", textAlign: "center" }}>Log out instead</button>
       </div>
     </div>
   );
@@ -513,6 +607,16 @@ export default function App() {
   const [businessDate, setBusinessDate] = useState(today());
   const [businessDays, setBusinessDays] = useState({});
 
+  // --- toasts: surfaces save/sync failures instead of swallowing them silently ---
+  const [toasts, setToasts] = useState([]);
+  const pushToast = (message, tone = "error", timeoutMs = 6000) => {
+    const id = uid();
+    setToasts((t) => [...t, { id, message, tone }]);
+    if (timeoutMs) setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), timeoutMs);
+    return id;
+  };
+  const dismissToast = (id) => setToasts((t) => t.filter((x) => x.id !== id));
+
   useEffect(() => {
     const link = document.createElement("link");
     link.rel = "stylesheet";
@@ -576,33 +680,90 @@ export default function App() {
     })();
   }, []);
 
-  // persist helpers — update local state immediately, sync the change to Supabase in the background
+  // --- realtime sync: keeps every open screen/device in sync live, instead of only
+  // loading once on mount. Without this, two staff on two devices can silently
+  // overwrite each other's changes to the same order or table. ---
+  useEffect(() => {
+    const applyChange = (setter, fromDb) => (payload) => {
+      setter((prev) => {
+        if (payload.eventType === "DELETE") {
+          return prev.filter((row) => row.id !== payload.old.id);
+        }
+        const incoming = fromDb(payload.new);
+        const idx = prev.findIndex((row) => row.id === incoming.id);
+        if (idx === -1) return [...prev, incoming];
+        const next = prev.slice();
+        next[idx] = incoming;
+        return next;
+      });
+    };
+
+    const channel = supabase
+      .channel("parijat-pos-realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, applyChange(setOrders, TABLE_MAP.orders.fromDb))
+      .on("postgres_changes", { event: "*", schema: "public", table: "dining_tables" }, applyChange(setTables, TABLE_MAP.tables.fromDb))
+      .on("postgres_changes", { event: "*", schema: "public", table: "menu_items" }, applyChange(setMenu, TABLE_MAP.menu.fromDb))
+      .on("postgres_changes", { event: "*", schema: "public", table: "inventory_items" }, applyChange(setInventory, TABLE_MAP.inventory.fromDb))
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          pushToast("Live sync disconnected — other devices' changes may not appear until you refresh.", "warn", 8000);
+        }
+      });
+
+    return () => { supabase.removeChannel(channel); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // persist helpers — update local state immediately (optimistic), sync the change to
+  // Supabase in the background, and if the sync fails: tell the user via a toast and
+  // roll the local state back to what it was before, so the UI never lies about what
+  // actually got saved.
+  const makePersist = (key, setState) => (v) => {
+    let prev;
+    setState((current) => { prev = current; return v; });
+    syncTable(key, prev, v).then((res) => {
+      if (!res.ok) {
+        setState(prev); // roll back — the save didn't actually happen
+        pushToast(`Couldn't save your last change to ${TABLE_MAP[key].table.replace(/_/g, " ")}. It's been reverted — please try again.`, "error");
+      }
+    });
+  };
+
   const persist = {
-    menu: (v) => { const prev = menu; setMenu(v); syncTable("menu", prev, v); },
-    tables: (v) => { const prev = tables; setTables(v); syncTable("tables", prev, v); },
-    orders: (v) => { const prev = orders; setOrders(v); syncTable("orders", prev, v); },
-    inventory: (v) => { const prev = inventory; setInventory(v); syncTable("inventory", prev, v); },
-    waste: (v) => { const prev = waste; setWaste(v); syncTable("waste", prev, v); },
-    expenses: (v) => { const prev = expenses; setExpenses(v); syncTable("expenses", prev, v); },
-    customers: (v) => { const prev = customers; setCustomers(v); syncTable("customers", prev, v); },
-    referrals: (v) => { const prev = referrals; setReferrals(v); syncTable("referrals", prev, v); },
-    purchases: (v) => { const prev = purchases; setPurchases(v); syncTable("purchases", prev, v); },
-    cashDeposits: (v) => { const prev = cashDeposits; setCashDeposits(v); syncTable("cashDeposits", prev, v); },
-    creditTransactions: (v) => { const prev = creditTransactions; setCreditTransactions(v); syncTable("creditTransactions", prev, v); },
+    menu: makePersist("menu", setMenu),
+    tables: makePersist("tables", setTables),
+    orders: makePersist("orders", setOrders),
+    inventory: makePersist("inventory", setInventory),
+    waste: makePersist("waste", setWaste),
+    expenses: makePersist("expenses", setExpenses),
+    customers: makePersist("customers", setCustomers),
+    referrals: makePersist("referrals", setReferrals),
+    purchases: makePersist("purchases", setPurchases),
+    cashDeposits: makePersist("cashDeposits", setCashDeposits),
+    creditTransactions: makePersist("creditTransactions", setCreditTransactions),
     refreshStaff: async () => {
-      const { data } = await supabase.rpc("list_staff");
+      const { data, error } = await supabase.rpc("list_staff");
+      if (error) { pushToast("Couldn't refresh staff list: " + error.message, "error"); return; }
       setStaff(data || []);
     },
   };
 
   const currentBusinessDay = getBusinessDay(businessDays, businessDate);
 
-  // updates local state immediately and saves just that one day's row to Supabase in the background
+  // updates local state immediately and saves just that one day's row to Supabase in the
+  // background; rolls back and warns if the save fails, same pattern as persist.* above.
   const updateBusinessDay = (dateKey, updater) => {
+    let prevDays;
     setBusinessDays((prev) => {
+      prevDays = prev;
       const nextDay = updater(getBusinessDay(prev, dateKey));
       const next = { ...prev, [dateKey]: nextDay };
-      saveBusinessDay(nextDay);
+      saveBusinessDay(nextDay).then((res) => {
+        if (!res.ok) {
+          setBusinessDays(prevDays);
+          pushToast("Couldn't save the business day change. It's been reverted — please try again.", "error");
+        }
+      });
       return next;
     });
   };
@@ -621,6 +782,7 @@ export default function App() {
       closeNotes: "",
       audit: [...(day.audit || []), { action: "DAY_OPENED", at: new Date().toISOString(), by: currentUser?.name || "Unknown", openingCash: Number(openingCash) }],
     }));
+    logAudit(currentUser?.name, "DAY_OPENED", { date: businessDate, openingCash: Number(openingCash) });
   };
 
   const closeBusinessDay = (actualClosingCash, closeNotes, summary) => {
@@ -635,6 +797,7 @@ export default function App() {
       closeSummary: summary,
       audit: [...(day.audit || []), { action: "DAY_CLOSED", at: new Date().toISOString(), by: currentUser?.name || "Unknown", actualClosingCash: Number(actualClosingCash), ...summary, notes: closeNotes || "" }],
     }));
+    logAudit(currentUser?.name, "DAY_CLOSED", { date: businessDate, actualClosingCash: Number(actualClosingCash), ...summary });
   };
 
   const reopenBusinessDay = (reason) => {
@@ -645,6 +808,7 @@ export default function App() {
       closedBy: null,
       audit: [...(day.audit || []), { action: "DAY_REOPENED", at: new Date().toISOString(), by: currentUser?.name || "Unknown", reason }],
     }));
+    logAudit(currentUser?.name, "DAY_REOPENED", { date: businessDate, reason });
   };
 
   const NAV = [
@@ -664,6 +828,7 @@ export default function App() {
     { id: "refer", label: "Refer & Earn", icon: Share2, group: "Grow" },
     { id: "creditbook", label: "Credit Book", icon: CreditCard, group: "Operate" },
     { id: "staff", label: "Staff & Roles", icon: Shield, group: "Admin" },
+    { id: "auditlog", label: "Audit Log", icon: Lock, group: "Admin" },
   ];
   const groups = ["Main", "Operate", "Grow", "Admin"];
   const allowed = currentUser ? (ROLE_ACCESS[currentUser.role] || []) : [];
@@ -671,16 +836,31 @@ export default function App() {
 
   const login = async (username, password) => {
     const { data, error } = await supabase.rpc("login_staff", { p_username: username.trim(), p_password: password });
-    if (error) { setLoginError("Something went wrong reaching the server. Try again."); return; }
+    if (error) {
+      if (error.message && error.message.includes("ACCOUNT_LOCKED")) {
+        const until = error.message.split(":")[1] || "shortly";
+        setLoginError(`Too many failed attempts. This account is locked until ${until}.`);
+      } else {
+        setLoginError("Something went wrong reaching the server. Try again.");
+      }
+      logAudit(username, "LOGIN_FAILED", { reason: "error", message: error.message });
+      return;
+    }
     const found = data && data[0];
-    if (!found) { setLoginError("Incorrect username or password."); return; }
+    if (!found) {
+      setLoginError("Incorrect username or password.");
+      logAudit(username, "LOGIN_FAILED", { reason: "bad_credentials" });
+      return;
+    }
     if (!found.active) { setLoginError("This account has been deactivated. Ask the owner to reactivate it."); return; }
     setLoginError("");
     setCurrentUser(found);
+    logAudit(found.name, "LOGIN_SUCCESS", { role: found.role });
     try { localStorage.setItem("parijat_session_id", found.id); } catch (e) { /* ignore */ }
     setActive(ROLE_ACCESS[found.role][0] || "overview");
   };
   const logout = () => {
+    if (currentUser) logAudit(currentUser.name, "LOGOUT", {});
     setCurrentUser(null);
     setActive("overview");
     try { localStorage.removeItem("parijat_session_id"); } catch (e) { /* ignore */ }
@@ -695,13 +875,27 @@ export default function App() {
   }
 
   if (!currentUser) {
-    return <Login staff={staff} onLogin={login} error={loginError} />;
+    return <><Login staff={staff} onLogin={login} error={loginError} /><ToastStack toasts={toasts} onDismiss={dismissToast} /></>;
+  }
+
+  if (currentUser.must_change_password) {
+    return (
+      <>
+        <ForcePasswordChange
+          currentUser={currentUser}
+          onDone={(updatedUser) => setCurrentUser(updatedUser)}
+          onLogout={logout}
+        />
+        <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      </>
+    );
   }
 
   const activeLabel = NAV.find((n) => n.id === active)?.label || "";
 
   return (
     <div style={{ fontFamily: "'Inter', Arial, sans-serif", background: T.cream, minHeight: "100%", display: "flex", color: T.ink }}>
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
       {/* ---------- sidebar ---------- */}
       <div style={{
         width: 232, background: T.dusk, color: T.petal, flexShrink: 0, padding: "22px 14px",
@@ -784,7 +978,7 @@ export default function App() {
           {active === "tables" && <TablesView tables={tables} setTables={persist.tables} orders={orders} />}
           {active === "purchase" && <PurchaseManagement purchases={purchases} setPurchases={persist.purchases} inventory={inventory} setInventory={persist.inventory} businessDay={currentBusinessDay} />}
           {active === "inventory" && <Inventory inventory={inventory} setInventory={persist.inventory} waste={waste} setWaste={persist.waste} businessDay={currentBusinessDay} />}
-          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} cashDeposits={cashDeposits} setCashDeposits={persist.cashDeposits} businessDay={currentBusinessDay} creditTransactions={creditTransactions} />}
+          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} cashDeposits={cashDeposits} setCashDeposits={persist.cashDeposits} businessDay={currentBusinessDay} creditTransactions={creditTransactions} currentUser={currentUser} />}
           {active === "menu" && <MenuManagement menu={menu} setMenu={persist.menu} />}
           {active === "crm" && <CRM customers={customers} setCustomers={persist.customers} orders={orders} />}
           {active === "sales" && <SalesReport orders={orders} menu={menu} />}
@@ -794,6 +988,7 @@ export default function App() {
           {active === "refer" && <ReferEarn customers={customers} referrals={referrals} setReferrals={persist.referrals} setCustomers={persist.customers} />}
           {active === "creditbook" && <CreditBook customers={customers} creditTransactions={creditTransactions} setCreditTransactions={persist.creditTransactions} currentUser={currentUser} businessDay={currentBusinessDay} />}
           {active === "staff" && <StaffManagement staff={staff} refreshStaff={persist.refreshStaff} currentUser={currentUser} />}
+          {active === "auditlog" && <AuditLogView />}
         </div>
       </div>
       <style>{`
@@ -1011,6 +1206,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     discountAmt = Math.min(Math.max(0, discountAmt), subtotal); // clamp between 0 and subtotal
     const newTotal = subtotal - discountAmt;
     setOrders(orders.map((o) => (o.id === order.id ? { ...o, subtotal, discount: discountAmt, total: newTotal, discountBy: currentUser?.name || "Unknown" } : o)));
+    logAudit(currentUser?.name, "DISCOUNT_APPLIED", { orderId: order.id, table: order.tableName, subtotal, discountAmt, newTotal });
     setDiscountTarget(null);
   };
 
@@ -1070,6 +1266,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
       id: uid(), customerId, customerName, type: "sale", orderId: order.id,
       amount: order.total, date: today(), createdBy: currentUser?.name || "Unknown",
     }]);
+    logAudit(currentUser?.name, "CREDIT_SALE", { orderId: order.id, customerName, amount: order.total });
     setCreditStep(null);
   };
 
@@ -1103,6 +1300,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     if (order.paymentMethod === "credit") {
       setCreditTransactions(creditTransactions.filter((c) => !(c.orderId === order.id && c.type === "sale")));
     }
+    logAudit(currentUser?.name, "BILL_VOIDED", { orderId: order.id, table: order.tableName, total: order.total, reason: voidReason.trim() });
     setVoidTarget(null);
   };
 
@@ -1657,7 +1855,7 @@ function Inventory({ inventory, setInventory, waste, setWaste, businessDay }) {
 }
 
 /* ================= ACCOUNTING ================= */
-function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, setCashDeposits, businessDay, creditTransactions }) {
+function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, setCashDeposits, businessDay, creditTransactions, currentUser }) {
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState({ category: "Ingredients", description: "", amount: "", paymentMethod: "cash" });
   const [depositModal, setDepositModal] = useState(false);
@@ -1682,6 +1880,7 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
     if (businessDay.status !== "open") { alert("Business Day is closed. Open it before logging a cash deposit."); return; }
     if (!depositAmount) return;
     setCashDeposits([...cashDeposits, { id: uid(), amount: Number(depositAmount), notes: depositNotes, date: today() }]);
+    logAudit(currentUser?.name, "CASH_DEPOSIT", { amount: Number(depositAmount), notes: depositNotes });
     setDepositAmount(""); setDepositNotes(""); setDepositModal(false);
   };
   const removeDeposit = (id) => setCashDeposits(cashDeposits.filter((d) => d.id !== id));
@@ -2395,6 +2594,7 @@ function CreditBook({ customers, creditTransactions, setCreditTransactions, curr
       id: uid(), customerId: repayCustomerId, customerName: bal.customerName, type: "repayment",
       amount: Number(repayAmount), paymentMethod: repayMethod, notes: repayNotes, date: today(), createdBy: currentUser?.name || "Unknown",
     }]);
+    logAudit(currentUser?.name, "CREDIT_REPAYMENT", { customerName: bal.customerName, amount: Number(repayAmount), method: repayMethod });
     setRepayModal(false);
   };
 
@@ -2496,6 +2696,108 @@ function CreditBook({ customers, creditTransactions, setCreditTransactions, curr
   );
 }
 
+/* ================= AUDIT LOG ================= */
+function AuditLogView() {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [actionFilter, setActionFilter] = useState("all");
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      const data = await fetchAuditLog(500);
+      setEntries(data);
+      setLoading(false);
+    })();
+  }, []);
+
+  const refresh = async () => {
+    setLoading(true);
+    const data = await fetchAuditLog(500);
+    setEntries(data);
+    setLoading(false);
+  };
+
+  const actionTone = (action) => {
+    if (action.includes("FAILED") || action === "BILL_VOIDED" || action === "STAFF_DELETED" || action === "STAFF_DEACTIVATED") return "bad";
+    if (action.includes("SUCCESS") || action === "DAY_OPENED" || action === "STAFF_CREATED" || action === "STAFF_REACTIVATED") return "good";
+    if (action === "DAY_REOPENED" || action.includes("RESET") || action === "DISCOUNT_APPLIED") return "warn";
+    return "neutral";
+  };
+
+  const actionOptions = useMemo(() => ["all", ...Array.from(new Set(entries.map((e) => e.action)))], [entries]);
+
+  const filtered = entries.filter((e) => {
+    if (actionFilter !== "all" && e.action !== actionFilter) return false;
+    if (search && !(e.actor || "").toLowerCase().includes(search.toLowerCase()) && !e.action.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
+
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const sheet = filtered.map((e) => ({
+      Date: new Date(e.at).toLocaleString(),
+      Actor: e.actor,
+      Action: e.action,
+      Details: e.details ? JSON.stringify(e.details) : "",
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Audit Log");
+    XLSX.writeFile(wb, `parijat-cafe-audit-log-${today()}.xlsx`);
+  };
+
+  return (
+    <div>
+      <Card style={{ padding: 18, marginBottom: 20 }}>
+        <div style={{ fontSize: 12.5, color: T.plum }}>
+          A running record of sensitive actions — logins, discounts, voids, cash movements, staff changes, and business day open/close. This is app-level logging (see the Security notes your developer flagged) — good for accountability and catching mistakes, not a substitute for full database-level security.
+        </div>
+      </Card>
+
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ position: "relative" }}>
+            <Search size={14} style={{ position: "absolute", left: 10, top: 10, color: T.plum, opacity: 0.5 }} />
+            <input style={{ ...inputStyle, paddingLeft: 30, width: 220 }} placeholder="Search by staff or action…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          </div>
+          <select style={{ ...inputStyle, width: 200 }} value={actionFilter} onChange={(e) => setActionFilter(e.target.value)}>
+            {actionOptions.map((a) => <option key={a} value={a}>{a === "all" ? "All actions" : a}</option>)}
+          </select>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn variant="ghost" onClick={refresh}>Refresh</Btn>
+          <Btn variant="primary" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+        </div>
+      </div>
+
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        {loading ? (
+          <Empty text="Loading audit log…" />
+        ) : filtered.length === 0 ? (
+          <Empty text="No matching audit entries yet." />
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}>
+              <th style={{ padding: "10px 14px" }}>When</th><th>Staff</th><th>Action</th><th>Details</th>
+            </tr></thead>
+            <tbody>
+              {filtered.map((e) => (
+                <tr key={e.id} style={{ borderTop: `1px solid ${T.line}` }}>
+                  <td style={{ padding: "9px 14px", opacity: 0.7, whiteSpace: "nowrap" }}>{new Date(e.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</td>
+                  <td style={{ fontWeight: 600 }}>{e.actor || "—"}</td>
+                  <td><Pill tone={actionTone(e.action)}>{e.action}</Pill></td>
+                  <td style={{ fontSize: 12, color: T.plum, opacity: 0.85, maxWidth: 360 }}>
+                    {e.details ? Object.entries(e.details).filter(([k]) => k !== "message").map(([k, v]) => `${k}: ${v}`).join(" · ") : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 function StaffManagement({ staff, refreshStaff, currentUser }) {
   const [modal, setModal] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -2509,6 +2811,7 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
   const save = async () => {
     if (!form.name || !form.username) return;
     if (!editing && !form.password) { alert("Set a password for the new account."); return; }
+    if (form.password && form.password.length < 6) { alert("Password must be at least 6 characters."); return; }
     const usernameTaken = staff.some((s) => s.username.toLowerCase() === form.username.trim().toLowerCase() && s.id !== editing);
     if (usernameTaken) { alert("That username is already taken — pick another."); return; }
     setSaving(true);
@@ -2518,20 +2821,32 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
       if (form.password) {
         const { error: pwErr } = await supabase.rpc("update_staff_password", { p_id: editing, p_password: form.password });
         if (pwErr) { alert("Name/role saved, but password update failed: " + pwErr.message); }
+        else logAudit(currentUser.name, "STAFF_PASSWORD_RESET", { targetId: editing, targetName: form.name });
       }
+      logAudit(currentUser.name, "STAFF_UPDATED", { targetId: editing, name: form.name, username: form.username, role: form.role });
     } else {
-      const { error } = await supabase.rpc("create_staff", { p_name: form.name, p_username: form.username, p_password: form.password, p_role: form.role });
+      const { error } = await supabase.rpc("create_staff", { p_name: form.name, p_username: form.username, p_password: form.password, p_role: form.role, p_must_change_password: true });
       if (error) { alert("Couldn't create account: " + error.message); setSaving(false); return; }
+      logAudit(currentUser.name, "STAFF_CREATED", { name: form.name, username: form.username, role: form.role });
     }
     await refreshStaff();
     setSaving(false);
     setModal(false);
   };
 
+  const forceReset = async (s) => {
+    if (!confirm(`Force ${s.name} to set a new password at their next login?`)) return;
+    const { error } = await supabase.rpc("flag_must_change_password", { p_id: s.id });
+    if (error) { alert("Couldn't flag account: " + error.message); return; }
+    logAudit(currentUser.name, "STAFF_FORCED_RESET", { targetId: s.id, targetName: s.name });
+    alert(`${s.name} will be asked to set a new password next time they log in.`);
+  };
+
   const toggleActive = async (s) => {
     if (s.id === currentUser.id) { alert("You can't deactivate the account you're currently signed in with."); return; }
     const { error } = await supabase.rpc("set_staff_active", { p_id: s.id, p_active: !s.active });
     if (error) { alert("Couldn't update status: " + error.message); return; }
+    logAudit(currentUser.name, s.active ? "STAFF_DEACTIVATED" : "STAFF_REACTIVATED", { targetId: s.id, targetName: s.name });
     await refreshStaff();
   };
   const remove = async (s) => {
@@ -2540,6 +2855,7 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
     if (s.role === "owner" && owners.length <= 1) { alert("At least one active Owner account must remain."); return; }
     const { error } = await supabase.rpc("delete_staff", { p_id: s.id });
     if (error) { alert("Couldn't remove account: " + error.message); return; }
+    logAudit(currentUser.name, "STAFF_DELETED", { targetId: s.id, targetName: s.name });
     await refreshStaff();
   };
 
@@ -2554,9 +2870,9 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
             <div key={r.id}>
               <Pill tone={roleTone[r.id]}>{r.label}</Pill>
               <div style={{ color: T.plum, marginTop: 6, lineHeight: 1.5 }}>
-                {r.id === "owner" && "Full access — every module, plus Staff & Roles."}
-                {r.id === "manager" && "Everything except Staff & Roles."}
-                {r.id === "cashier" && "Orders, Tables, Accounting, CRM, Sales, QR/Online, Loyalty, Refer."}
+                {r.id === "owner" && "Full access — every module, plus Staff & Roles and the Audit Log."}
+                {r.id === "manager" && "Everything except Staff & Roles and the Audit Log."}
+                {r.id === "cashier" && "Orders, Tables, Accounting, CRM, Sales, QR/Online, Loyalty, Refer, Credit Book."}
                 {r.id === "barista" && "Kitchen Display and Order & KOT only."}
               </div>
             </div>
@@ -2585,6 +2901,7 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
                   <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                     <button onClick={() => openEdit(s)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.plum }}>Edit</button>
                     <button onClick={() => toggleActive(s)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.plum }}>{s.active ? "Deactivate" : "Reactivate"}</button>
+                    <button onClick={() => forceReset(s)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.plum }}>Force Reset</button>
                     <button onClick={() => remove(s)} style={{ background: "none", border: "none", cursor: "pointer", color: T.red }}><Trash2 size={13} /></button>
                   </div>
                 </td>
