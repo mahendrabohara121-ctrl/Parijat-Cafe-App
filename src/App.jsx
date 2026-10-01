@@ -195,19 +195,34 @@ async function fetchTable(key) {
 // delete anything that used to be in oldArr but isn't in newArr anymore.
 // Returns { ok: boolean, error? } instead of swallowing failures, so callers can
 // show the user something went wrong and roll back optimistic state if needed.
+// Serialize writes per table. Without this, two fast order changes (for example
+// Served -> Paid) can race in Supabase: an older full-array upsert may arrive after
+// the newer one and put the order back into the previous status.
+const syncQueues = {};
+
 async function syncTable(key, oldArr, newArr) {
-  const { table, toDb } = TABLE_MAP[key];
-  const newIds = new Set(newArr.map((r) => r.id));
-  const toDelete = oldArr.filter((r) => !newIds.has(r.id)).map((r) => r.id);
-  if (newArr.length) {
-    const { error } = await supabase.from(table).upsert(newArr.map(toDb));
-    if (error) { console.error("upsert failed", table, error); return { ok: false, error }; }
-  }
-  if (toDelete.length) {
-    const { error } = await supabase.from(table).delete().in("id", toDelete);
-    if (error) { console.error("delete failed", table, error); return { ok: false, error }; }
-  }
-  return { ok: true };
+  const run = async () => {
+    const { table, toDb } = TABLE_MAP[key];
+    const newIds = new Set(newArr.map((r) => r.id));
+    const toDelete = oldArr.filter((r) => !newIds.has(r.id)).map((r) => r.id);
+    if (newArr.length) {
+      const { error } = await supabase.from(table).upsert(newArr.map(toDb));
+      if (error) { console.error("upsert failed", table, error); return { ok: false, error }; }
+    }
+    if (toDelete.length) {
+      const { error } = await supabase.from(table).delete().in("id", toDelete);
+      if (error) { console.error("delete failed", table, error); return { ok: false, error }; }
+    }
+    return { ok: true };
+  };
+
+  const previous = syncQueues[key] || Promise.resolve();
+  const current = previous.catch(() => {}).then(run);
+  syncQueues[key] = current;
+  current.finally(() => {
+    if (syncQueues[key] === current) delete syncQueues[key];
+  });
+  return current;
 }
 
 /* ---------------- business days (keyed by date, not id — handled separately from the generic tables above) ---------------- */
@@ -964,12 +979,17 @@ export default function App() {
   // Supabase in the background, and if the sync fails: tell the user via a toast and
   // roll the local state back to what it was before, so the UI never lies about what
   // actually got saved.
-  const makePersist = (key, setState) => (v) => {
+  const makePersist = (key, setState) => (valueOrUpdater) => {
     let prev;
-    setState((current) => { prev = current; return v; });
-    syncTable(key, prev, v).then((res) => {
+    let next;
+    setState((current) => {
+      prev = current;
+      next = typeof valueOrUpdater === "function" ? valueOrUpdater(current) : valueOrUpdater;
+      return next;
+    });
+    syncTable(key, prev, next).then((res) => {
       if (!res.ok) {
-        setState(prev); // roll back — the save didn't actually happen
+        setState(() => prev); // roll back — the save didn't actually happen
         pushToast(`Couldn't save your last change to ${TABLE_MAP[key].table.replace(/_/g, " ")}. It's been reverted — please try again.`, "error");
       }
     });
@@ -1374,7 +1394,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
       return { menuId: id, name: m.name, qty, price: m.price };
     });
     const order = { id: uid(), tableId, tableName: table.name, items, subtotal: cartTotal, discount: 0, total: cartTotal, status: "placed", createdAt: new Date().toISOString(), source: "dine-in" };
-    setOrders([...orders, order]);
+    setOrders((currentOrders) => [...currentOrders, order]);
     setTables(tables.map((t) => (t.id === tableId ? { ...t, status: "occupied", orderId: order.id } : t)));
     setCart({}); setTableId(""); setItemSearch(""); setModal(false);
   };
@@ -1400,7 +1420,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     });
     const newSubtotal = mergedItems.reduce((s, it) => s + it.qty * it.price, 0);
     const newTotal = Math.max(0, newSubtotal - (order.discount || 0));
-    setOrders(orders.map((o) => (o.id === order.id
+    setOrders((currentOrders) => currentOrders.map((o) => (o.id === order.id
       ? { ...o, items: mergedItems, subtotal: newSubtotal, total: newTotal, status: "placed" } // back to "placed" so kitchen/bar sees the new item
       : o)));
     setAddItemTarget(null); setAddCart({}); setAddItemSearch("");
@@ -1437,7 +1457,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     const newSubtotal = removeDraftItems.reduce((s, it) => s + it.qty * it.price, 0);
     const newDiscount = Math.min(removeItemTarget.discount || 0, newSubtotal); // re-clamp discount so it never exceeds the smaller subtotal
     const newTotal = Math.max(0, newSubtotal - newDiscount);
-    setOrders(orders.map((o) => (o.id === removeItemTarget.id
+    setOrders((currentOrders) => currentOrders.map((o) => (o.id === removeItemTarget.id
       ? { ...o, items: removeDraftItems, subtotal: newSubtotal, discount: newDiscount, total: newTotal }
       : o)));
     setRemoveItemTarget(null); setRemoveDraftItems([]);
@@ -1452,7 +1472,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     if (discountType === "percent") discountAmt = Math.round(subtotal * (discountAmt / 100));
     discountAmt = Math.min(Math.max(0, discountAmt), subtotal); // clamp between 0 and subtotal
     const newTotal = subtotal - discountAmt;
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, subtotal, discount: discountAmt, total: newTotal, discountBy: currentUser?.name || "Unknown" } : o)));
+    setOrders((currentOrders) => currentOrders.map((o) => (o.id === order.id ? { ...o, subtotal, discount: discountAmt, total: newTotal, discountBy: currentUser?.name || "Unknown" } : o)));
     logAudit(currentUser?.name, "DISCOUNT_APPLIED", { orderId: order.id, table: order.tableName, subtotal, discountAmt, newTotal });
     setDiscountTarget(null);
   };
@@ -1462,7 +1482,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     const next = flow[flow.indexOf(order.status) + 1];
     if (!next) return;
     if (next === "paid") { setPayOrder(order); return; } // don't finalize yet — need payment method
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: next } : o)));
+    setOrders((currentOrders) => currentOrders.map((o) => (o.id === order.id ? { ...o, status: next } : o)));
   };
 
   const [creditStep, setCreditStep] = useState(null); // order awaiting a customer to attach the credit sale to
@@ -1479,7 +1499,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
 
   const finalizeSettlement = (order, method, customerNameOverride) => {
     const finalCustomerName = customerNameOverride || order.customerName;
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "paid", paymentMethod: method, paidAt: new Date().toISOString(), customerName: finalCustomerName || o.customerName } : o)));
+    setOrders((currentOrders) => currentOrders.map((o) => (o.id === order.id ? { ...o, status: "paid", paymentMethod: method, paidAt: new Date().toISOString(), customerName: finalCustomerName || o.customerName } : o)));
     setTables(tables.map((t) => (t.id === order.tableId ? { ...t, status: "free", orderId: null } : t)));
     // loyalty points: 1 point per Rs 100
     const cust = customers.find((c) => c.name === finalCustomerName);
@@ -1518,7 +1538,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
   };
 
   const cancelOrder = (order) => {
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "cancelled" } : o)));
+    setOrders((currentOrders) => currentOrders.map((o) => (o.id === order.id ? { ...o, status: "cancelled" } : o)));
     setTables(tables.map((t) => (t.id === order.tableId ? { ...t, status: "free", orderId: null } : t)));
   };
   const [voidTarget, setVoidTarget] = useState(null);
@@ -1535,7 +1555,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
   const confirmVoid = () => {
     if (!voidReason.trim()) return;
     const order = voidTarget;
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "cancelled", cancelReason: voidReason.trim(), cancelledFromPaid: true, voidedBy: currentUser?.name || "Unknown" } : o)));
+    setOrders((currentOrders) => currentOrders.map((o) => (o.id === order.id ? { ...o, status: "cancelled", cancelReason: voidReason.trim(), cancelledFromPaid: true, voidedBy: currentUser?.name || "Unknown" } : o)));
     // reverse any loyalty points/visit that were credited when it was paid
     const cust = customers.find((c) => c.name === order.customerName);
     if (cust) {
@@ -1860,7 +1880,7 @@ function KDS({ orders, setOrders, tables, setTables, menu }) {
     { key: "ready", label: "Ready to Serve", icon: Check },
   ];
   const advance = (order, to) => {
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: to } : o)));
+    setOrders((currentOrders) => currentOrders.map((o) => (o.id === order.id ? { ...o, status: to } : o)));
   };
 
   const stationOf = (menuId) => menu.find((m) => m.id === menuId)?.station || "kitchen";
@@ -2560,7 +2580,7 @@ function OnlineOrder({ menu, orders, setOrders, businessDay }) {
       const m = menu.find((mm) => mm.id === id);
       return { menuId: id, name: m.name, qty, price: m.price };
     });
-    setOrders([...orders, { id: uid(), tableId: null, tableName: "Online", items, total, status: "placed", createdAt: new Date().toISOString(), source: "online", customerName }]);
+    setOrders((currentOrders) => [...currentOrders, { id: uid(), tableId: null, tableName: "Online", items, total, status: "placed", createdAt: new Date().toISOString(), source: "online", customerName }]);
     setCart({}); setPlaced(true);
     setTimeout(() => setPlaced(false), 3500);
   };
