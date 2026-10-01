@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   LayoutDashboard, ClipboardList, LayoutGrid, Package, Wallet, UtensilsCrossed,
   Users, ChefHat, BarChart3, QrCode, ShoppingBag, Gift, Share2, Plus, X, Trash2,
   Check, Clock, Flame, AlertTriangle, TrendingUp, TrendingDown, Search, Menu as MenuIcon, Shield, Eye, EyeOff, LogOut, Truck,
-  CalendarDays, Lock, Unlock, CheckCircle2, CreditCard, Printer
+  CalendarDays, Lock, Unlock, CheckCircle2, CreditCard
 } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -75,9 +75,9 @@ const ROLES = [
   { id: "cashier", label: "Cashier" },
   { id: "barista", label: "Barista" },
 ];
-// which modules each role can see. "staff" (Staff Management) and "auditlog" are owner-only.
+// which modules each role can see. "staff" (Staff Management) is owner-only.
 const ROLE_ACCESS = {
-  owner: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook", "staff", "auditlog"],
+  owner: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook", "staff"],
   manager: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook"],
   cashier: ["overview", "orders", "tables", "accounting", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook"],
   barista: ["kds", "orders"],
@@ -192,22 +192,19 @@ async function fetchTable(key) {
 }
 
 // reconcile the whole in-memory array back to Supabase: upsert everything present,
-// delete anything that used to be in oldArr but isn't in newArr anymore.
-// Returns { ok: boolean, error? } instead of swallowing failures, so callers can
-// show the user something went wrong and roll back optimistic state if needed.
+// delete anything that used to be in oldArr but isn't in newArr anymore
 async function syncTable(key, oldArr, newArr) {
   const { table, toDb } = TABLE_MAP[key];
   const newIds = new Set(newArr.map((r) => r.id));
   const toDelete = oldArr.filter((r) => !newIds.has(r.id)).map((r) => r.id);
   if (newArr.length) {
     const { error } = await supabase.from(table).upsert(newArr.map(toDb));
-    if (error) { console.error("upsert failed", table, error); return { ok: false, error }; }
+    if (error) console.error("upsert failed", table, error);
   }
   if (toDelete.length) {
     const { error } = await supabase.from(table).delete().in("id", toDelete);
-    if (error) { console.error("delete failed", table, error); return { ok: false, error }; }
+    if (error) console.error("delete failed", table, error);
   }
-  return { ok: true };
 }
 
 /* ---------------- business days (keyed by date, not id — handled separately from the generic tables above) ---------------- */
@@ -247,214 +244,7 @@ async function saveBusinessDay(day) {
     audit: day.audit || [],
   };
   const { error } = await supabase.from("business_days").upsert(row, { onConflict: "date" });
-  if (error) { console.error("save business_day failed", error); return { ok: false, error }; }
-  return { ok: true };
-}
-
-/* ---------------- audit log ---------------- */
-// fire-and-forget: never blocks or breaks the action it's logging, even if the insert fails
-async function logAudit(actor, action, details) {
-  try {
-    const { error } = await supabase.from("audit_log").insert({ actor: actor || "Unknown", action, details: details || null });
-    if (error) console.error("audit log failed", error);
-  } catch (e) {
-    console.error("audit log failed", e);
-  }
-}
-async function fetchAuditLog(limit = 500) {
-  const { data, error } = await supabase.from("audit_log").select("*").order("at", { ascending: false }).limit(limit);
-  if (error) { console.error("fetch audit_log failed", error); return []; }
-  return data;
-}
-
-/* ---------------- printable day-close report ---------------- */
-const PAYMENT_LABELS = {
-  cash: "Cash", fonepay: "FonePay", esewa: "eSewa", khalti: "Khalti",
-  card: "Card", bank: "Bank Transfer", credit: "Credit",
-};
-
-function buildDayCloseReportHtml(businessDate, day, orders, expenses, purchases, cashDeposits, creditTransactions) {
-  const paidOrders = orders.filter((o) => o.status === "paid" && (o.paidAt || o.createdAt || "").slice(0, 10) === businessDate);
-  const voidedToday = orders.filter((o) => o.status === "cancelled" && o.cancelledFromPaid && (o.paidAt || o.createdAt || "").slice(0, 10) === businessDate);
-  const dayExpenses = expenses.filter((e) => e.date === businessDate);
-  const dayPurchases = purchases.filter((p) => p.date === businessDate);
-  const dayDeposits = cashDeposits.filter((d) => d.date === businessDate);
-  const dayCredit = (creditTransactions || []).filter((c) => c.date === businessDate);
-
-  const totalSales = paidOrders.reduce((s, o) => s + Number(o.total || 0), 0);
-  const totalDiscount = paidOrders.reduce((s, o) => s + Number(o.discount || 0), 0);
-  const totalExpense = dayExpenses.reduce((s, e) => s + Number(e.amount || 0), 0);
-  const totalPurchase = dayPurchases.reduce((s, p) => s + Number(p.totalCost || 0), 0);
-  const netForDay = totalSales - totalExpense - totalPurchase;
-
-  const methodBreakdown = Object.keys(PAYMENT_LABELS)
-    .filter((id) => id !== "credit")
-    .map((id) => ({
-      label: PAYMENT_LABELS[id],
-      count: paidOrders.filter((o) => o.paymentMethod === id).length,
-      total: paidOrders.filter((o) => o.paymentMethod === id).reduce((s, o) => s + Number(o.total || 0), 0),
-    }))
-    .filter((p) => p.count > 0);
-
-  const cashSales = paidOrders.filter((o) => o.paymentMethod === "cash").reduce((s, o) => s + Number(o.total || 0), 0);
-  const cashExpenses = dayExpenses.filter((e) => e.paymentMethod === "cash").reduce((s, e) => s + Number(e.amount || 0), 0);
-  const cashPurchases = dayPurchases.filter((p) => p.paymentMethod === "cash").reduce((s, p) => s + Number(p.totalCost || 0), 0);
-  const cashDeposited = dayDeposits.reduce((s, d) => s + Number(d.amount || 0), 0);
-  const expectedCash = Number(day.openingCash || 0) + cashSales - cashExpenses - cashPurchases - cashDeposited;
-  const actualCash = Number(day.actualClosingCash || 0);
-  const cashDifference = actualCash - expectedCash;
-
-  const creditSalesToday = dayCredit.filter((c) => c.type === "sale").reduce((s, c) => s + Number(c.amount || 0), 0);
-  const creditRepaidToday = dayCredit.filter((c) => c.type === "repayment").reduce((s, c) => s + Number(c.amount || 0), 0);
-
-  const topItems = (() => {
-    const map = {};
-    paidOrders.forEach((o) => o.items.forEach((it) => { map[it.name] = (map[it.name] || 0) + it.qty; }));
-    return Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, 10);
-  })();
-
-  const expenseByCategory = (() => {
-    const map = {};
-    dayExpenses.forEach((e) => { map[e.category] = (map[e.category] || 0) + Number(e.amount || 0); });
-    return Object.entries(map).sort((a, b) => b[1] - a[1]);
-  })();
-
-  const fmtMoney = (n) => "Rs " + Number(n || 0).toLocaleString("en-IN");
-  const fmtTime = (iso) => iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
-  const fmtDateLong = new Date(`${businessDate}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", day: "2-digit", month: "long", year: "numeric" });
-  const generatedAt = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-
-  const row = (a, b) => `<tr><td>${a}</td><td class="num">${b}</td></tr>`;
-  const section = (title, inner) => `<div class="section"><h2>${title}</h2>${inner}</div>`;
-
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8" />
-<title>Day Close Report — ${businessDate}</title>
-<style>
-  * { box-sizing: border-box; }
-  body { font-family: 'Segoe UI', Arial, sans-serif; color: #14213D; max-width: 720px; margin: 0 auto; padding: 28px 24px; font-size: 13px; }
-  h1 { font-size: 20px; margin: 0 0 2px; }
-  .sub { color: #6B7280; font-size: 12.5px; margin-bottom: 18px; }
-  .meta { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; padding: 12px 14px; background: #F6F8FB; border-radius: 8px; }
-  .meta div { font-size: 12px; }
-  .meta strong { display: block; font-size: 13.5px; color: #14213D; }
-  .section { margin-bottom: 20px; page-break-inside: avoid; }
-  .section h2 { font-size: 14px; border-bottom: 2px solid #14213D; padding-bottom: 4px; margin-bottom: 8px; }
-  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  td, th { padding: 5px 4px; border-bottom: 1px solid #E6E9F0; text-align: left; }
-  td.num, th.num { text-align: right; }
-  tr.total td { font-weight: 700; border-top: 2px solid #14213D; border-bottom: none; }
-  .status-open { color: #15803D; font-weight: 700; }
-  .status-closed { color: #991B1B; font-weight: 700; }
-  .diff-ok { color: #15803D; font-weight: 700; }
-  .diff-bad { color: #B91C1C; font-weight: 700; }
-  .signatures { display: flex; justify-content: space-between; margin-top: 40px; }
-  .sig { width: 45%; text-align: center; }
-  .sig .line { border-top: 1px solid #14213D; margin-top: 40px; padding-top: 6px; font-size: 11.5px; color: #6B7280; }
-  .footer { margin-top: 24px; font-size: 10.5px; color: #9CA3AF; text-align: center; }
-  .empty { color: #9CA3AF; font-style: italic; font-size: 12px; }
-  @media print { body { padding: 0; } }
-</style>
-</head>
-<body>
-  <h1>Parijat Cafe — Day Close Report</h1>
-  <div class="sub">${fmtDateLong}</div>
-
-  <div class="meta">
-    <div>Status<strong class="${day.status === "open" ? "status-open" : "status-closed"}">${day.status === "open" ? "OPEN" : "CLOSED"}</strong></div>
-    <div>Opened<strong>${fmtTime(day.openedAt)} by ${day.openedBy || "—"}</strong></div>
-    <div>Closed<strong>${day.closedAt ? fmtTime(day.closedAt) + " by " + (day.closedBy || "—") : "—"}</strong></div>
-    <div>Opening Cash<strong>${fmtMoney(day.openingCash)}</strong></div>
-  </div>
-
-  ${section("Sales Summary", `
-    <table>
-      <tr><th>Payment Method</th><th class="num">Orders</th><th class="num">Amount</th></tr>
-      ${methodBreakdown.length ? methodBreakdown.map((m) => `<tr><td>${m.label}</td><td class="num">${m.count}</td><td class="num">${fmtMoney(m.total)}</td></tr>`).join("") : `<tr><td colspan="3" class="empty">No sales recorded for this date.</td></tr>`}
-      <tr class="total"><td>Total Sales</td><td class="num">${paidOrders.length}</td><td class="num">${fmtMoney(totalSales)}</td></tr>
-    </table>
-  `)}
-
-  ${section("Cash Reconciliation", `
-    <table>
-      ${row("Opening Cash in Drawer", fmtMoney(day.openingCash))}
-      ${row("+ Cash Sales", fmtMoney(cashSales))}
-      ${row("− Cash Expenses", fmtMoney(cashExpenses))}
-      ${row("− Cash Purchases", fmtMoney(cashPurchases))}
-      ${row("− Cash Deposited to Bank", fmtMoney(cashDeposited))}
-      <tr class="total">${row("Expected Closing Cash", fmtMoney(expectedCash)).replace("<tr>", "").replace("</tr>", "")}</tr>
-      ${row("Actual Cash Counted", day.status === "closed" ? fmtMoney(actualCash) : "Not yet closed")}
-      ${day.status === "closed" ? `<tr><td>Difference</td><td class="num ${cashDifference === 0 ? "diff-ok" : "diff-bad"}">${fmtMoney(cashDifference)}${cashDifference === 0 ? " (matches)" : ""}</td></tr>` : ""}
-    </table>
-    ${day.closeNotes ? `<div style="margin-top:8px;font-size:12px;"><strong>Closing notes:</strong> ${day.closeNotes}</div>` : ""}
-  `)}
-
-  ${section("Discounts &amp; Credit", `
-    <table>
-      ${row("Total Discounts Given", fmtMoney(totalDiscount))}
-      ${row("Credit Sales Today", fmtMoney(creditSalesToday))}
-      ${row("Credit Repayments Received Today", fmtMoney(creditRepaidToday))}
-    </table>
-  `)}
-
-  ${section("Expenses", `
-    <table>
-      <tr><th>Category</th><th class="num">Amount</th></tr>
-      ${expenseByCategory.length ? expenseByCategory.map(([cat, amt]) => `<tr><td>${cat}</td><td class="num">${fmtMoney(amt)}</td></tr>`).join("") : `<tr><td colspan="2" class="empty">No expenses recorded.</td></tr>`}
-      <tr class="total"><td>Total Expenses</td><td class="num">${fmtMoney(totalExpense)}</td></tr>
-    </table>
-  `)}
-
-  ${section("Purchases", `
-    <table>
-      ${row("Total Purchase Spend", fmtMoney(totalPurchase))}
-      ${row("Purchase Entries", dayPurchases.length)}
-    </table>
-  `)}
-
-  ${section("Top Selling Items", `
-    <table>
-      <tr><th>Item</th><th class="num">Qty Sold</th></tr>
-      ${topItems.length ? topItems.map(([name, qty]) => `<tr><td>${name}</td><td class="num">${qty}</td></tr>`).join("") : `<tr><td colspan="2" class="empty">No items sold.</td></tr>`}
-    </table>
-  `)}
-
-  ${voidedToday.length ? section("Voided Bills (after payment)", `
-    <table>
-      <tr><th>Table</th><th class="num">Amount</th><th>Reason</th><th>Voided By</th></tr>
-      ${voidedToday.map((o) => `<tr><td>${o.tableName}</td><td class="num">${fmtMoney(o.total)}</td><td>${o.cancelReason || "—"}</td><td>${o.voidedBy || "—"}</td></tr>`).join("")}
-    </table>
-  `) : ""}
-
-  ${section("Net for the Day", `
-    <table>
-      ${row("Total Sales", fmtMoney(totalSales))}
-      ${row("− Total Expenses", fmtMoney(totalExpense))}
-      ${row("− Total Purchases", fmtMoney(totalPurchase))}
-      <tr class="total">${row("Net", fmtMoney(netForDay)).replace("<tr>", "").replace("</tr>", "")}</tr>
-    </table>
-  `)}
-
-  <div class="signatures">
-    <div class="sig"><div class="line">Prepared by (Cashier/Manager)</div></div>
-    <div class="sig"><div class="line">Verified by (Owner/Manager)</div></div>
-  </div>
-
-  <div class="footer">Generated ${generatedAt} · Parijat Cafe POS</div>
-
-  <script>window.onload = function() { window.print(); };</script>
-</body>
-</html>`;
-}
-
-function printDayCloseReport(businessDate, day, orders, expenses, purchases, cashDeposits, creditTransactions) {
-  const html = buildDayCloseReportHtml(businessDate, day, orders, expenses, purchases, cashDeposits, creditTransactions);
-  const win = window.open("", "_blank");
-  if (!win) { alert("Please allow pop-ups for this site to print the report."); return; }
-  win.document.write(html);
-  win.document.close();
+  if (error) console.error("save business_day failed", error);
 }
 
 /* ---------------- small UI atoms ---------------- */
@@ -517,30 +307,6 @@ function Field({ label, children }) {
 }
 const inputStyle = { width: "100%", padding: "9px 11px", border: `1px solid ${T.line}`, borderRadius: 8, fontSize: 13.5, fontFamily: "inherit" };
 
-/* ---------------- toasts (surfaces save/sync failures instead of swallowing them) ---------------- */
-function ToastStack({ toasts, onDismiss }) {
-  if (!toasts.length) return null;
-  const toneStyle = {
-    error: { bg: "#FEE2E2", color: "#991B1B", border: "#FCA5A5" },
-    warn: { bg: "#FEF3C7", color: "#92400E", border: "#FDE68A" },
-    success: { bg: "#DCFCE7", color: "#166534", border: "#BBF7D0" },
-    info: { bg: "#EFF6FF", color: "#1E40AF", border: "#BFDBFE" },
-  };
-  return (
-    <div style={{ position: "fixed", top: 16, right: 16, zIndex: 999, display: "flex", flexDirection: "column", gap: 8, maxWidth: 340 }}>
-      {toasts.map((t) => {
-        const s = toneStyle[t.tone] || toneStyle.info;
-        return (
-          <div key={t.id} style={{ background: s.bg, color: s.color, border: `1px solid ${s.border}`, borderRadius: 10, padding: "10px 12px", fontSize: 12.5, boxShadow: "0 4px 14px rgba(0,0,0,0.08)", display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
-            <span style={{ lineHeight: 1.4 }}>{t.message}</span>
-            <button onClick={() => onDismiss(t.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", opacity: 0.6, flexShrink: 0 }}><X size={13} /></button>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 /* ================= LOGIN ================= */
 function Login({ staff, onLogin, error }) {
   const [username, setUsername] = useState("");
@@ -587,56 +353,6 @@ function Login({ staff, onLogin, error }) {
   );
 }
 
-/* ================= FORCE PASSWORD CHANGE ================= */
-function ForcePasswordChange({ currentUser, onDone, onLogout }) {
-  const [pw1, setPw1] = useState("");
-  const [pw2, setPw2] = useState("");
-  const [showPw, setShowPw] = useState(false);
-  const [err, setErr] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  const submit = async () => {
-    setErr("");
-    if (pw1.length < 6) { setErr("Password must be at least 6 characters."); return; }
-    if (pw1 !== pw2) { setErr("Passwords don't match."); return; }
-    setSaving(true);
-    const { error: pwErr } = await supabase.rpc("update_staff_password", { p_id: currentUser.id, p_password: pw1 });
-    if (pwErr) { setErr("Couldn't set password: " + pwErr.message); setSaving(false); return; }
-    const { error: flagErr } = await supabase.rpc("clear_must_change_password", { p_id: currentUser.id });
-    if (flagErr) { setErr("Password saved, but couldn't clear the reset flag: " + flagErr.message); setSaving(false); return; }
-    logAudit(currentUser.name, "PASSWORD_CHANGED", { self: true });
-    onDone({ ...currentUser, must_change_password: false });
-  };
-
-  return (
-    <div style={{ minHeight: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: T.cream, fontFamily: "'Inter', Arial, sans-serif", padding: 20 }}>
-      <div style={{ background: "#fff", border: `1px solid ${T.line}`, borderRadius: 14, padding: 32, width: 380, maxWidth: "100%" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-          <Lock size={20} color={T.gold} />
-          <span style={{ fontWeight: 700, fontSize: 17, color: T.dusk }}>Set a New Password</span>
-        </div>
-        <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 22 }}>
-          For security, {currentUser.name} needs to set a fresh password before continuing.
-        </div>
-        <Field label="New Password">
-          <div style={{ position: "relative" }}>
-            <input type={showPw ? "text" : "password"} style={{ ...inputStyle, paddingRight: 36 }} value={pw1} onChange={(e) => setPw1(e.target.value)} autoFocus />
-            <button type="button" onClick={() => setShowPw((s) => !s)} style={{ position: "absolute", right: 8, top: 7, background: "none", border: "none", cursor: "pointer", color: T.plum }}>
-              {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
-            </button>
-          </div>
-        </Field>
-        <Field label="Confirm New Password">
-          <input type={showPw ? "text" : "password"} style={inputStyle} value={pw2} onChange={(e) => setPw2(e.target.value)} />
-        </Field>
-        {err && <div style={{ fontSize: 12.5, color: T.red, background: "#FEE2E2", padding: "8px 10px", borderRadius: 8, marginBottom: 14 }}>{err}</div>}
-        <Btn onClick={submit} variant="primary" disabled={saving} style={{ width: "100%", justifyContent: "center", marginBottom: 10 }}>{saving ? "Saving…" : "Set Password & Continue"}</Btn>
-        <button onClick={onLogout} style={{ background: "none", border: "none", color: T.plum, cursor: "pointer", fontSize: 12, width: "100%", textAlign: "center" }}>Log out instead</button>
-      </div>
-    </div>
-  );
-}
-
 /* ================= BUSINESS DAY ================= */
 const getBusinessDay = (days, date) => days[date] || {
   date,
@@ -653,7 +369,7 @@ const getBusinessDay = (days, date) => days[date] || {
 };
 
 function BusinessDayControl({
-  businessDate, businessDay, orders, expenses, purchases, cashDeposits, creditTransactions, currentUser,
+  businessDate, businessDay, orders, expenses, purchases, cashDeposits, currentUser,
   onChangeDate, onOpenDay, onCloseDay, onReopenDay,
 }) {
   const [openModal, setOpenModal] = useState(false);
@@ -692,7 +408,6 @@ function BusinessDayControl({
           <div style={{ fontSize: 12.5, fontWeight: 700, color: T.dusk }}>{formatDay(businessDate)}</div>
         </div>
         <Pill tone={businessDay.status === "open" ? "good" : "bad"}>{businessDay.status === "open" ? "● Day Open" : "● Day Closed"}</Pill>
-        <Btn variant="ghost" onClick={() => printDayCloseReport(businessDate, businessDay, orders, expenses, purchases, cashDeposits, creditTransactions)}><Printer size={14} /> Print Report</Btn>
         {businessDay.status === "open" ? (
           <Btn variant="danger" onClick={() => { setActualCash(""); setCloseNotes(""); setCloseModal(true); }}><Lock size={14} /> Close Day</Btn>
         ) : (
@@ -746,15 +461,8 @@ function BusinessDayControl({
               const amount = Number(actualCash);
               if (!Number.isFinite(amount) || amount < 0) return alert("Enter the actual cash counted.");
               onCloseDay(amount, closeNotes, { expectedCash, totalSales, paidOrders: paidOrders.length, cashSales, cashExpenses, cashPurchases, cashDeposited });
-              // print the report using the just-entered actual cash, even though state
-              // hasn't re-rendered with the closed status yet
-              printDayCloseReport(
-                businessDate,
-                { ...businessDay, status: "closed", actualClosingCash: amount, closeNotes },
-                orders, expenses, purchases, cashDeposits, creditTransactions
-              );
               setCloseModal(false);
-            }}><Lock size={14} /> Confirm Close Day &amp; Print</Btn>
+            }}><Lock size={14} /> Confirm Close Day</Btn>
           </div>
         </Modal>
       )}
@@ -793,6 +501,10 @@ export default function App() {
   const [menu, setMenu] = useState([]);
   const [tables, setTables] = useState([]);
   const [orders, setOrders] = useState([]);
+  // Keep the latest orders outside React's render cycle so rapid actions
+  // (e.g. Served -> Paid) never calculate from a stale closure.
+  const ordersRef = useRef([]);
+  const orderWriteQueueRef = useRef(Promise.resolve());
   const [inventory, setInventory] = useState([]);
   const [waste, setWaste] = useState([]);
   const [expenses, setExpenses] = useState([]);
@@ -804,16 +516,6 @@ export default function App() {
   const [staff, setStaff] = useState([]);
   const [businessDate, setBusinessDate] = useState(today());
   const [businessDays, setBusinessDays] = useState({});
-
-  // --- toasts: surfaces save/sync failures instead of swallowing them silently ---
-  const [toasts, setToasts] = useState([]);
-  const pushToast = (message, tone = "error", timeoutMs = 6000) => {
-    const id = uid();
-    setToasts((t) => [...t, { id, message, tone }]);
-    if (timeoutMs) setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), timeoutMs);
-    return id;
-  };
-  const dismissToast = (id) => setToasts((t) => t.filter((x) => x.id !== id));
 
   useEffect(() => {
     const link = document.createElement("link");
@@ -842,6 +544,7 @@ export default function App() {
       // seed empty tables on very first run so the app isn't blank
       setMenu(m.length ? m : SEED_MENU);
       setTables(t.length ? t : SEED_TABLES);
+      ordersRef.current = o;
       setOrders(o);
       setInventory(inv.length ? inv : SEED_INVENTORY);
       setWaste(w);
@@ -878,138 +581,55 @@ export default function App() {
     })();
   }, []);
 
-  // --- realtime sync: keeps every open screen/device in sync live, instead of only
-  // loading once on mount. Without this, two staff on two devices can silently
-  // overwrite each other's changes to the same order or table.
-  //
-  // Realtime channels can drop (network blips, Supabase-side hiccups, etc.) and
-  // supabase-js does NOT automatically rejoin a channel that errored out — only
-  // the underlying socket reconnects. So without explicit handling here, one
-  // dropped connection means the app silently stops receiving live updates
-  // until a manual refresh. This sets up auto-reconnect with backoff so a
-  // transient blip recovers on its own within a few seconds. ---
-  useEffect(() => {
-    let channel = null;
-    let reconnectTimer = null;
-    let attempt = 0;
-    let cancelled = false;
+  // persist helpers — update local state immediately, then serialize writes for
+  // orders so a fast Served -> Paid sequence can never let an older write arrive
+  // after the newer one. The setter also accepts a functional updater, which
+  // prevents stale React closures from dropping an immediately previous change.
+  const persistOrders = (updater) => {
+    const prev = ordersRef.current;
+    const next = typeof updater === "function" ? updater(prev) : updater;
+    if (!Array.isArray(next)) return;
 
-    const applyChange = (setter, fromDb) => (payload) => {
-      setter((prev) => {
-        if (payload.eventType === "DELETE") {
-          return prev.filter((row) => row.id !== payload.old.id);
-        }
-        const incoming = fromDb(payload.new);
-        const idx = prev.findIndex((row) => row.id === incoming.id);
-        if (idx === -1) return [...prev, incoming];
-        const next = prev.slice();
-        next[idx] = incoming;
-        return next;
-      });
-    };
+    ordersRef.current = next;
+    setOrders(next);
 
-    const connect = () => {
-      if (cancelled) return;
-      if (channel) { supabase.removeChannel(channel); }
+    // Queue the complete snapshot writes in the exact order the user made them.
+    // We keep syncTable's existing behavior so inserts/updates/deletes continue
+    // to work exactly as before, but never run two order writes concurrently.
+    orderWriteQueueRef.current = orderWriteQueueRef.current
+      .catch(() => {})
+      .then(() => syncTable("orders", prev, next))
+      .catch((error) => console.error("orders sync failed", error));
 
-      channel = supabase
-        .channel("parijat-pos-realtime-" + Date.now()) // unique name per attempt avoids stale-topic reuse issues
-        .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, applyChange(setOrders, TABLE_MAP.orders.fromDb))
-        .on("postgres_changes", { event: "*", schema: "public", table: "dining_tables" }, applyChange(setTables, TABLE_MAP.tables.fromDb))
-        .on("postgres_changes", { event: "*", schema: "public", table: "menu_items" }, applyChange(setMenu, TABLE_MAP.menu.fromDb))
-        .on("postgres_changes", { event: "*", schema: "public", table: "inventory_items" }, applyChange(setInventory, TABLE_MAP.inventory.fromDb))
-        .subscribe((status) => {
-          if (cancelled) return;
-          if (status === "SUBSCRIBED") {
-            if (attempt > 0) pushToast("Live sync reconnected.", "success", 3000);
-            attempt = 0; // reset backoff once we're healthy again
-            return;
-          }
-          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-            attempt += 1;
-            const delay = Math.min(30000, 1000 * 2 ** attempt); // 2s, 4s, 8s... capped at 30s
-            if (attempt === 1) {
-              pushToast("Live sync disconnected — trying to reconnect…", "warn", delay + 2000);
-            }
-            if (reconnectTimer) clearTimeout(reconnectTimer);
-            reconnectTimer = setTimeout(connect, delay);
-          }
-        });
-    };
-
-    connect();
-
-    // Fallback safety net: even if the WebSocket never connects at all (blocked
-    // by a firewall/antivirus, or an extended outage), silently re-fetch the
-    // live-critical tables every 15s so the app still converges on its own
-    // without anyone needing to manually refresh.
-    const pollInterval = setInterval(async () => {
-      const [freshOrders, freshTables] = await Promise.all([fetchTable("orders"), fetchTable("tables")]);
-      if (!cancelled) {
-        setOrders(freshOrders);
-        setTables(freshTables);
-      }
-    }, 15000);
-
-    return () => {
-      cancelled = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (channel) supabase.removeChannel(channel);
-      clearInterval(pollInterval);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // persist helpers — update local state immediately (optimistic), sync the change to
-  // Supabase in the background, and if the sync fails: tell the user via a toast and
-  // roll the local state back to what it was before, so the UI never lies about what
-  // actually got saved.
-  const makePersist = (key, setState) => (v) => {
-    let prev;
-    setState((current) => { prev = current; return v; });
-    syncTable(key, prev, v).then((res) => {
-      if (!res.ok) {
-        setState(prev); // roll back — the save didn't actually happen
-        pushToast(`Couldn't save your last change to ${TABLE_MAP[key].table.replace(/_/g, " ")}. It's been reverted — please try again.`, "error");
-      }
-    });
+    return orderWriteQueueRef.current;
   };
 
   const persist = {
-    menu: makePersist("menu", setMenu),
-    tables: makePersist("tables", setTables),
-    orders: makePersist("orders", setOrders),
-    inventory: makePersist("inventory", setInventory),
-    waste: makePersist("waste", setWaste),
-    expenses: makePersist("expenses", setExpenses),
-    customers: makePersist("customers", setCustomers),
-    referrals: makePersist("referrals", setReferrals),
-    purchases: makePersist("purchases", setPurchases),
-    cashDeposits: makePersist("cashDeposits", setCashDeposits),
-    creditTransactions: makePersist("creditTransactions", setCreditTransactions),
+    menu: (v) => { const prev = menu; setMenu(v); syncTable("menu", prev, v); },
+    tables: (v) => { const prev = tables; setTables(v); syncTable("tables", prev, v); },
+    orders: persistOrders,
+    inventory: (v) => { const prev = inventory; setInventory(v); syncTable("inventory", prev, v); },
+    waste: (v) => { const prev = waste; setWaste(v); syncTable("waste", prev, v); },
+    expenses: (v) => { const prev = expenses; setExpenses(v); syncTable("expenses", prev, v); },
+    customers: (v) => { const prev = customers; setCustomers(v); syncTable("customers", prev, v); },
+    referrals: (v) => { const prev = referrals; setReferrals(v); syncTable("referrals", prev, v); },
+    purchases: (v) => { const prev = purchases; setPurchases(v); syncTable("purchases", prev, v); },
+    cashDeposits: (v) => { const prev = cashDeposits; setCashDeposits(v); syncTable("cashDeposits", prev, v); },
+    creditTransactions: (v) => { const prev = creditTransactions; setCreditTransactions(v); syncTable("creditTransactions", prev, v); },
     refreshStaff: async () => {
-      const { data, error } = await supabase.rpc("list_staff");
-      if (error) { pushToast("Couldn't refresh staff list: " + error.message, "error"); return; }
+      const { data } = await supabase.rpc("list_staff");
       setStaff(data || []);
     },
   };
 
   const currentBusinessDay = getBusinessDay(businessDays, businessDate);
 
-  // updates local state immediately and saves just that one day's row to Supabase in the
-  // background; rolls back and warns if the save fails, same pattern as persist.* above.
+  // updates local state immediately and saves just that one day's row to Supabase in the background
   const updateBusinessDay = (dateKey, updater) => {
-    let prevDays;
     setBusinessDays((prev) => {
-      prevDays = prev;
       const nextDay = updater(getBusinessDay(prev, dateKey));
       const next = { ...prev, [dateKey]: nextDay };
-      saveBusinessDay(nextDay).then((res) => {
-        if (!res.ok) {
-          setBusinessDays(prevDays);
-          pushToast("Couldn't save the business day change. It's been reverted — please try again.", "error");
-        }
-      });
+      saveBusinessDay(nextDay);
       return next;
     });
   };
@@ -1028,7 +648,6 @@ export default function App() {
       closeNotes: "",
       audit: [...(day.audit || []), { action: "DAY_OPENED", at: new Date().toISOString(), by: currentUser?.name || "Unknown", openingCash: Number(openingCash) }],
     }));
-    logAudit(currentUser?.name, "DAY_OPENED", { date: businessDate, openingCash: Number(openingCash) });
   };
 
   const closeBusinessDay = (actualClosingCash, closeNotes, summary) => {
@@ -1043,7 +662,6 @@ export default function App() {
       closeSummary: summary,
       audit: [...(day.audit || []), { action: "DAY_CLOSED", at: new Date().toISOString(), by: currentUser?.name || "Unknown", actualClosingCash: Number(actualClosingCash), ...summary, notes: closeNotes || "" }],
     }));
-    logAudit(currentUser?.name, "DAY_CLOSED", { date: businessDate, actualClosingCash: Number(actualClosingCash), ...summary });
   };
 
   const reopenBusinessDay = (reason) => {
@@ -1054,7 +672,6 @@ export default function App() {
       closedBy: null,
       audit: [...(day.audit || []), { action: "DAY_REOPENED", at: new Date().toISOString(), by: currentUser?.name || "Unknown", reason }],
     }));
-    logAudit(currentUser?.name, "DAY_REOPENED", { date: businessDate, reason });
   };
 
   const NAV = [
@@ -1074,7 +691,6 @@ export default function App() {
     { id: "refer", label: "Refer & Earn", icon: Share2, group: "Grow" },
     { id: "creditbook", label: "Credit Book", icon: CreditCard, group: "Operate" },
     { id: "staff", label: "Staff & Roles", icon: Shield, group: "Admin" },
-    { id: "auditlog", label: "Audit Log", icon: Lock, group: "Admin" },
   ];
   const groups = ["Main", "Operate", "Grow", "Admin"];
   const allowed = currentUser ? (ROLE_ACCESS[currentUser.role] || []) : [];
@@ -1082,31 +698,16 @@ export default function App() {
 
   const login = async (username, password) => {
     const { data, error } = await supabase.rpc("login_staff", { p_username: username.trim(), p_password: password });
-    if (error) {
-      if (error.message && error.message.includes("ACCOUNT_LOCKED")) {
-        const until = error.message.split(":")[1] || "shortly";
-        setLoginError(`Too many failed attempts. This account is locked until ${until}.`);
-      } else {
-        setLoginError("Something went wrong reaching the server. Try again.");
-      }
-      logAudit(username, "LOGIN_FAILED", { reason: "error", message: error.message });
-      return;
-    }
+    if (error) { setLoginError("Something went wrong reaching the server. Try again."); return; }
     const found = data && data[0];
-    if (!found) {
-      setLoginError("Incorrect username or password.");
-      logAudit(username, "LOGIN_FAILED", { reason: "bad_credentials" });
-      return;
-    }
+    if (!found) { setLoginError("Incorrect username or password."); return; }
     if (!found.active) { setLoginError("This account has been deactivated. Ask the owner to reactivate it."); return; }
     setLoginError("");
     setCurrentUser(found);
-    logAudit(found.name, "LOGIN_SUCCESS", { role: found.role });
     try { localStorage.setItem("parijat_session_id", found.id); } catch (e) { /* ignore */ }
     setActive(ROLE_ACCESS[found.role][0] || "overview");
   };
   const logout = () => {
-    if (currentUser) logAudit(currentUser.name, "LOGOUT", {});
     setCurrentUser(null);
     setActive("overview");
     try { localStorage.removeItem("parijat_session_id"); } catch (e) { /* ignore */ }
@@ -1121,27 +722,13 @@ export default function App() {
   }
 
   if (!currentUser) {
-    return <><Login staff={staff} onLogin={login} error={loginError} /><ToastStack toasts={toasts} onDismiss={dismissToast} /></>;
-  }
-
-  if (currentUser.must_change_password) {
-    return (
-      <>
-        <ForcePasswordChange
-          currentUser={currentUser}
-          onDone={(updatedUser) => setCurrentUser(updatedUser)}
-          onLogout={logout}
-        />
-        <ToastStack toasts={toasts} onDismiss={dismissToast} />
-      </>
-    );
+    return <Login staff={staff} onLogin={login} error={loginError} />;
   }
 
   const activeLabel = NAV.find((n) => n.id === active)?.label || "";
 
   return (
     <div style={{ fontFamily: "'Inter', Arial, sans-serif", background: T.cream, minHeight: "100%", display: "flex", color: T.ink }}>
-      <ToastStack toasts={toasts} onDismiss={dismissToast} />
       {/* ---------- sidebar ---------- */}
       <div style={{
         width: 232, background: T.dusk, color: T.petal, flexShrink: 0, padding: "22px 14px",
@@ -1202,7 +789,6 @@ export default function App() {
               expenses={expenses}
               purchases={purchases}
               cashDeposits={cashDeposits}
-              creditTransactions={creditTransactions}
               currentUser={currentUser}
               onChangeDate={setBusinessDate}
               onOpenDay={openBusinessDay}
@@ -1225,7 +811,7 @@ export default function App() {
           {active === "tables" && <TablesView tables={tables} setTables={persist.tables} orders={orders} />}
           {active === "purchase" && <PurchaseManagement purchases={purchases} setPurchases={persist.purchases} inventory={inventory} setInventory={persist.inventory} businessDay={currentBusinessDay} />}
           {active === "inventory" && <Inventory inventory={inventory} setInventory={persist.inventory} waste={waste} setWaste={persist.waste} businessDay={currentBusinessDay} />}
-          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} cashDeposits={cashDeposits} setCashDeposits={persist.cashDeposits} businessDay={currentBusinessDay} creditTransactions={creditTransactions} currentUser={currentUser} />}
+          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} cashDeposits={cashDeposits} setCashDeposits={persist.cashDeposits} businessDay={currentBusinessDay} creditTransactions={creditTransactions} />}
           {active === "menu" && <MenuManagement menu={menu} setMenu={persist.menu} />}
           {active === "crm" && <CRM customers={customers} setCustomers={persist.customers} orders={orders} />}
           {active === "sales" && <SalesReport orders={orders} menu={menu} />}
@@ -1235,7 +821,6 @@ export default function App() {
           {active === "refer" && <ReferEarn customers={customers} referrals={referrals} setReferrals={persist.referrals} setCustomers={persist.customers} />}
           {active === "creditbook" && <CreditBook customers={customers} creditTransactions={creditTransactions} setCreditTransactions={persist.creditTransactions} currentUser={currentUser} businessDay={currentBusinessDay} />}
           {active === "staff" && <StaffManagement staff={staff} refreshStaff={persist.refreshStaff} currentUser={currentUser} />}
-          {active === "auditlog" && <AuditLogView />}
         </div>
       </div>
       <style>{`
@@ -1374,7 +959,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
       return { menuId: id, name: m.name, qty, price: m.price };
     });
     const order = { id: uid(), tableId, tableName: table.name, items, subtotal: cartTotal, discount: 0, total: cartTotal, status: "placed", createdAt: new Date().toISOString(), source: "dine-in" };
-    setOrders([...orders, order]);
+    setOrders((prev) => [...prev, order]);
     setTables(tables.map((t) => (t.id === tableId ? { ...t, status: "occupied", orderId: order.id } : t)));
     setCart({}); setTableId(""); setItemSearch(""); setModal(false);
   };
@@ -1400,7 +985,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     });
     const newSubtotal = mergedItems.reduce((s, it) => s + it.qty * it.price, 0);
     const newTotal = Math.max(0, newSubtotal - (order.discount || 0));
-    setOrders(orders.map((o) => (o.id === order.id
+    setOrders((prev) => prev.map((o) => (o.id === order.id
       ? { ...o, items: mergedItems, subtotal: newSubtotal, total: newTotal, status: "placed" } // back to "placed" so kitchen/bar sees the new item
       : o)));
     setAddItemTarget(null); setAddCart({}); setAddItemSearch("");
@@ -1437,7 +1022,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     const newSubtotal = removeDraftItems.reduce((s, it) => s + it.qty * it.price, 0);
     const newDiscount = Math.min(removeItemTarget.discount || 0, newSubtotal); // re-clamp discount so it never exceeds the smaller subtotal
     const newTotal = Math.max(0, newSubtotal - newDiscount);
-    setOrders(orders.map((o) => (o.id === removeItemTarget.id
+    setOrders((prev) => prev.map((o) => (o.id === removeItemTarget.id
       ? { ...o, items: removeDraftItems, subtotal: newSubtotal, discount: newDiscount, total: newTotal }
       : o)));
     setRemoveItemTarget(null); setRemoveDraftItems([]);
@@ -1452,8 +1037,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     if (discountType === "percent") discountAmt = Math.round(subtotal * (discountAmt / 100));
     discountAmt = Math.min(Math.max(0, discountAmt), subtotal); // clamp between 0 and subtotal
     const newTotal = subtotal - discountAmt;
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, subtotal, discount: discountAmt, total: newTotal, discountBy: currentUser?.name || "Unknown" } : o)));
-    logAudit(currentUser?.name, "DISCOUNT_APPLIED", { orderId: order.id, table: order.tableName, subtotal, discountAmt, newTotal });
+    setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, subtotal, discount: discountAmt, total: newTotal, discountBy: currentUser?.name || "Unknown" } : o)));
     setDiscountTarget(null);
   };
 
@@ -1462,7 +1046,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     const next = flow[flow.indexOf(order.status) + 1];
     if (!next) return;
     if (next === "paid") { setPayOrder(order); return; } // don't finalize yet — need payment method
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: next } : o)));
+    setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status: next } : o)));
   };
 
   const [creditStep, setCreditStep] = useState(null); // order awaiting a customer to attach the credit sale to
@@ -1479,7 +1063,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
 
   const finalizeSettlement = (order, method, customerNameOverride) => {
     const finalCustomerName = customerNameOverride || order.customerName;
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "paid", paymentMethod: method, paidAt: new Date().toISOString(), customerName: finalCustomerName || o.customerName } : o)));
+    setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status: "paid", paymentMethod: method, paidAt: new Date().toISOString(), customerName: finalCustomerName || o.customerName } : o)));
     setTables(tables.map((t) => (t.id === order.tableId ? { ...t, status: "free", orderId: null } : t)));
     // loyalty points: 1 point per Rs 100
     const cust = customers.find((c) => c.name === finalCustomerName);
@@ -1513,12 +1097,11 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
       id: uid(), customerId, customerName, type: "sale", orderId: order.id,
       amount: order.total, date: today(), createdBy: currentUser?.name || "Unknown",
     }]);
-    logAudit(currentUser?.name, "CREDIT_SALE", { orderId: order.id, customerName, amount: order.total });
     setCreditStep(null);
   };
 
   const cancelOrder = (order) => {
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "cancelled" } : o)));
+    setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status: "cancelled" } : o)));
     setTables(tables.map((t) => (t.id === order.tableId ? { ...t, status: "free", orderId: null } : t)));
   };
   const [voidTarget, setVoidTarget] = useState(null);
@@ -1535,7 +1118,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
   const confirmVoid = () => {
     if (!voidReason.trim()) return;
     const order = voidTarget;
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: "cancelled", cancelReason: voidReason.trim(), cancelledFromPaid: true, voidedBy: currentUser?.name || "Unknown" } : o)));
+    setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status: "cancelled", cancelReason: voidReason.trim(), cancelledFromPaid: true, voidedBy: currentUser?.name || "Unknown" } : o)));
     // reverse any loyalty points/visit that were credited when it was paid
     const cust = customers.find((c) => c.name === order.customerName);
     if (cust) {
@@ -1547,7 +1130,6 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     if (order.paymentMethod === "credit") {
       setCreditTransactions(creditTransactions.filter((c) => !(c.orderId === order.id && c.type === "sale")));
     }
-    logAudit(currentUser?.name, "BILL_VOIDED", { orderId: order.id, table: order.tableName, total: order.total, reason: voidReason.trim() });
     setVoidTarget(null);
   };
 
@@ -1860,7 +1442,7 @@ function KDS({ orders, setOrders, tables, setTables, menu }) {
     { key: "ready", label: "Ready to Serve", icon: Check },
   ];
   const advance = (order, to) => {
-    setOrders(orders.map((o) => (o.id === order.id ? { ...o, status: to } : o)));
+    setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status: to } : o)));
   };
 
   const stationOf = (menuId) => menu.find((m) => m.id === menuId)?.station || "kitchen";
@@ -2101,8 +1683,124 @@ function Inventory({ inventory, setInventory, waste, setWaste, businessDay }) {
   );
 }
 
+/* ================= PROFIT & LOSS REPORT ================= */
+function ProfitLossReport({ orders, expenses, purchases, businessDay, onClose }) {
+  const defaultDate = businessDay?.date || today();
+  const [fromDate, setFromDate] = useState(defaultDate);
+  const [toDate, setToDate] = useState(defaultDate);
+
+  const inRange = (value) => {
+    const d = String(value || "").slice(0, 10);
+    return d && d >= fromDate && d <= toDate;
+  };
+
+  const paidOrders = (orders || []).filter((o) => o.status === "paid" && inRange(o.paidAt || o.createdAt));
+  const reportExpenses = (expenses || []).filter((e) => inRange(e.date));
+  const reportPurchases = (purchases || []).filter((p) => inRange(p.date));
+
+  const salesRevenue = paidOrders.reduce((sum, o) => sum + Number(o.total || 0), 0);
+  const otherIncome = 0;
+  const totalIncome = salesRevenue + otherIncome;
+  const costOfGoods = reportPurchases.reduce((sum, p) => sum + Number(p.totalCost || 0), 0);
+
+  const expenseGroups = useMemo(() => {
+    const groups = {};
+    reportExpenses.forEach((e) => {
+      const category = e.category || "Other";
+      groups[category] = (groups[category] || 0) + Number(e.amount || 0);
+    });
+    return Object.entries(groups).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [reportExpenses]);
+
+  const operatingExpenses = expenseGroups.reduce((sum, [, amount]) => sum + amount, 0);
+  const grossProfit = totalIncome - costOfGoods;
+  const netProfit = grossProfit - operatingExpenses;
+  const totalExpenses = costOfGoods + operatingExpenses;
+
+  const incomeRows = [
+    { label: "Sales Revenue", amount: salesRevenue, strong: true },
+    ...(otherIncome > 0 ? [{ label: "Other Income", amount: otherIncome }] : []),
+  ];
+  const expenseRows = [
+    { label: "Cost of Goods / Purchases", amount: costOfGoods, strong: true },
+    ...expenseGroups.map(([label, amount]) => ({ label, amount })),
+  ];
+
+  const printReport = () => {
+    const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;");
+    const moneyText = (v) => `Rs ${Number(v || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const incomeHtml = incomeRows.map((r) => `<tr><td class="${r.strong ? "strong" : ""}">${esc(r.label)}</td><td class="amount">${moneyText(r.amount)}</td></tr>`).join("");
+    const expenseHtml = expenseRows.map((r) => `<tr><td class="${r.strong ? "strong" : ""}">${esc(r.label)}</td><td class="amount">${moneyText(r.amount)}</td></tr>`).join("");
+    const generated = new Date().toLocaleString("en-IN");
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Parijat Cafe - Profit and Loss Account</title><style>
+      @page { size: A4 portrait; margin: 14mm; } * { box-sizing: border-box; }
+      body { font-family: Arial, sans-serif; color: #222; margin: 0; font-size: 12px; }
+      .header { text-align: center; margin-bottom: 18px; } .header h1 { margin: 0 0 5px; font-size: 20px; } .header h2 { margin: 0; font-size: 16px; text-decoration: underline; }
+      .meta { display: grid; grid-template-columns: 1fr 1fr; margin: 14px 0; font-size: 11px; } .meta div:last-child { text-align: right; }
+      .columns { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid #444; } .column + .column { border-left: 1px solid #444; }
+      .title { text-align: center; font-weight: 700; font-size: 14px; padding: 8px; border-bottom: 1px solid #444; } table { width: 100%; border-collapse: collapse; }
+      td { padding: 6px 8px; vertical-align: top; } .amount { text-align: right; white-space: nowrap; } .strong { font-weight: 700; }
+      .total { border-top: 1px solid #444; font-weight: 700; } .summary { margin-top: 14px; border: 1px solid #444; }
+      .summary-row { display: flex; justify-content: space-between; padding: 9px 12px; } .profit { font-size: 16px; font-weight: 700; }
+      .footer { margin-top: 20px; font-size: 10px; color: #666; text-align: center; }
+    </style></head><body>
+      <div class="header"><h1>PARIJAT CAFE</h1><h2>Profit And Loss Account Report</h2></div>
+      <div class="meta"><div><b>Branch:</b> Main Branch<br><b>From Date:</b> ${esc(fromDate)}<br><b>To Date:</b> ${esc(toDate)}</div><div><b>Report Generated:</b> ${esc(generated)}<br><b>Basis:</b> Paid sales + recorded expenses/purchases</div></div>
+      <div class="columns">
+        <div class="column"><div class="title">Expenses</div><table>${expenseHtml}<tr class="total"><td>Total Expenses Amount</td><td class="amount">${moneyText(totalExpenses)}</td></tr></table></div>
+        <div class="column"><div class="title">Income</div><table>${incomeHtml}<tr class="total"><td>Total Income Amount</td><td class="amount">${moneyText(totalIncome)}</td></tr></table></div>
+      </div>
+      <div class="summary"><div class="summary-row"><span>Gross Profit</span><span>${moneyText(grossProfit)}</span></div><div class="summary-row profit"><span>${netProfit >= 0 ? "NET PROFIT" : "NET LOSS"}</span><span>${moneyText(Math.abs(netProfit))}</span></div></div>
+      <div class="footer">Generated from Parijat Cafe POS • ${esc(fromDate)} to ${esc(toDate)}</div>
+      <script>window.onload=function(){setTimeout(function(){window.print();},250);};</script>
+    </body></html>`;
+    const win = window.open("", "_blank", "width=1100,height=800");
+    if (!win) { alert("Please allow pop-ups for the P&L report."); return; }
+    win.document.open(); win.document.write(html); win.document.close();
+  };
+
+  return (
+    <Modal title="Profit & Loss Account Report" onClose={onClose}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10, marginBottom: 16 }}>
+        <Field label="From Date"><input type="date" style={inputStyle} value={fromDate} onChange={(e) => setFromDate(e.target.value)} /></Field>
+        <Field label="To Date"><input type="date" style={inputStyle} value={toDate} min={fromDate} onChange={(e) => setToDate(e.target.value)} /></Field>
+      </div>
+      <div style={{ border: `1px solid ${T.line}`, borderRadius: 10, overflow: "hidden", background: "#fff" }}>
+        <div style={{ padding: "16px 18px", textAlign: "center", borderBottom: `1px solid ${T.line}` }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: T.dusk }}>PARIJAT CAFE</div>
+          <div style={{ fontSize: 14, fontWeight: 700, textDecoration: "underline", marginTop: 4 }}>Profit And Loss Account Report</div>
+          <div style={{ fontSize: 11, color: T.plum, marginTop: 8 }}>From {fromDate} to {toDate}</div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
+          <div style={{ borderRight: `1px solid ${T.line}` }}>
+            <div style={{ textAlign: "center", fontWeight: 700, padding: 10, background: T.cream }}>Expenses</div>
+            {expenseRows.length === 0 ? <div style={{ padding: 18, color: T.plum, textAlign: "center" }}>No expenses recorded for this period.</div> : expenseRows.map((r) => (
+              <div key={r.label} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "8px 12px", borderTop: `1px solid ${T.line}`, fontWeight: r.strong ? 700 : 400 }}><span>{r.label}</span><span style={{ whiteSpace: "nowrap" }}>{money(r.amount)}</span></div>
+            ))}
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 12px", borderTop: "2px solid #9CA3AF", fontWeight: 800 }}><span>Total Expenses Amount</span><span>{money(totalExpenses)}</span></div>
+          </div>
+          <div>
+            <div style={{ textAlign: "center", fontWeight: 700, padding: 10, background: T.cream }}>Income</div>
+            {incomeRows.map((r) => (
+              <div key={r.label} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "8px 12px", borderTop: `1px solid ${T.line}`, fontWeight: r.strong ? 700 : 400 }}><span>{r.label}</span><span style={{ whiteSpace: "nowrap" }}>{money(r.amount)}</span></div>
+            ))}
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 12px", borderTop: "2px solid #9CA3AF", fontWeight: 800 }}><span>Total Income Amount</span><span>{money(totalIncome)}</span></div>
+          </div>
+        </div>
+        <div style={{ borderTop: `1px solid ${T.line}`, padding: 14, background: T.cream }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 7 }}><span>Gross Profit</span><strong>{money(grossProfit)}</strong></div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 800, color: netProfit >= 0 ? "#15803D" : T.red }}><span>{netProfit >= 0 ? "NET PROFIT" : "NET LOSS"}</span><span>{money(Math.abs(netProfit))}</span></div>
+        </div>
+      </div>
+      <div style={{ marginTop: 12, fontSize: 11.5, color: T.plum, lineHeight: 1.5 }}>P&L uses paid orders for income, recorded purchases as cost of goods, and recorded Accounting expenses for operating expenses. Other Income is not included because the current app has no separate other-income ledger.</div>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}><Btn variant="ghost" onClick={onClose}>Close</Btn><Btn variant="primary" onClick={printReport}>Print / Save PDF</Btn></div>
+    </Modal>
+  );
+}
+
 /* ================= ACCOUNTING ================= */
-function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, setCashDeposits, businessDay, creditTransactions, currentUser }) {
+function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, setCashDeposits, businessDay, creditTransactions }) {
+  const [showPnlReport, setShowPnlReport] = useState(false);
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState({ category: "Ingredients", description: "", amount: "", paymentMethod: "cash" });
   const [depositModal, setDepositModal] = useState(false);
@@ -2127,7 +1825,6 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
     if (businessDay.status !== "open") { alert("Business Day is closed. Open it before logging a cash deposit."); return; }
     if (!depositAmount) return;
     setCashDeposits([...cashDeposits, { id: uid(), amount: Number(depositAmount), notes: depositNotes, date: today() }]);
-    logAudit(currentUser?.name, "CASH_DEPOSIT", { amount: Number(depositAmount), notes: depositNotes });
     setDepositAmount(""); setDepositNotes(""); setDepositModal(false);
   };
   const removeDeposit = (id) => setCashDeposits(cashDeposits.filter((d) => d.id !== id));
@@ -2211,6 +1908,7 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14, gap: 8 }}>
+        <Btn variant="gold" onClick={() => setShowPnlReport(true)}>P&L Report</Btn>
         <Btn variant="ghost" onClick={() => exportToExcel("today")}><Download size={15} /> Export Today</Btn>
         <Btn variant="primary" onClick={() => exportToExcel("all")}><Download size={15} /> Export All</Btn>
       </div>
@@ -2330,6 +2028,15 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
           <Field label="Notes"><input style={inputStyle} value={depositNotes} onChange={(e) => setDepositNotes(e.target.value)} placeholder="Optional — e.g. bank branch, slip number" /></Field>
           <Btn variant="primary" onClick={addDeposit} style={{ width: "100%", justifyContent: "center" }}>Log Deposit</Btn>
         </Modal>
+      )}
+      {showPnlReport && (
+        <ProfitLossReport
+          orders={orders}
+          expenses={expenses}
+          purchases={purchases}
+          businessDay={businessDay}
+          onClose={() => setShowPnlReport(false)}
+        />
       )}
     </div>
   );
@@ -2645,7 +2352,7 @@ function OnlineOrder({ menu, orders, setOrders, businessDay }) {
       const m = menu.find((mm) => mm.id === id);
       return { menuId: id, name: m.name, qty, price: m.price };
     });
-    setOrders([...orders, { id: uid(), tableId: null, tableName: "Online", items, total, status: "placed", createdAt: new Date().toISOString(), source: "online", customerName }]);
+    setOrders((prev) => [...prev, { id: uid(), tableId: null, tableName: "Online", items, total, status: "placed", createdAt: new Date().toISOString(), source: "online", customerName }]);
     setCart({}); setPlaced(true);
     setTimeout(() => setPlaced(false), 3500);
   };
@@ -2841,7 +2548,6 @@ function CreditBook({ customers, creditTransactions, setCreditTransactions, curr
       id: uid(), customerId: repayCustomerId, customerName: bal.customerName, type: "repayment",
       amount: Number(repayAmount), paymentMethod: repayMethod, notes: repayNotes, date: today(), createdBy: currentUser?.name || "Unknown",
     }]);
-    logAudit(currentUser?.name, "CREDIT_REPAYMENT", { customerName: bal.customerName, amount: Number(repayAmount), method: repayMethod });
     setRepayModal(false);
   };
 
@@ -2943,108 +2649,6 @@ function CreditBook({ customers, creditTransactions, setCreditTransactions, curr
   );
 }
 
-/* ================= AUDIT LOG ================= */
-function AuditLogView() {
-  const [entries, setEntries] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [actionFilter, setActionFilter] = useState("all");
-  const [search, setSearch] = useState("");
-
-  useEffect(() => {
-    (async () => {
-      const data = await fetchAuditLog(500);
-      setEntries(data);
-      setLoading(false);
-    })();
-  }, []);
-
-  const refresh = async () => {
-    setLoading(true);
-    const data = await fetchAuditLog(500);
-    setEntries(data);
-    setLoading(false);
-  };
-
-  const actionTone = (action) => {
-    if (action.includes("FAILED") || action === "BILL_VOIDED" || action === "STAFF_DELETED" || action === "STAFF_DEACTIVATED") return "bad";
-    if (action.includes("SUCCESS") || action === "DAY_OPENED" || action === "STAFF_CREATED" || action === "STAFF_REACTIVATED") return "good";
-    if (action === "DAY_REOPENED" || action.includes("RESET") || action === "DISCOUNT_APPLIED") return "warn";
-    return "neutral";
-  };
-
-  const actionOptions = useMemo(() => ["all", ...Array.from(new Set(entries.map((e) => e.action)))], [entries]);
-
-  const filtered = entries.filter((e) => {
-    if (actionFilter !== "all" && e.action !== actionFilter) return false;
-    if (search && !(e.actor || "").toLowerCase().includes(search.toLowerCase()) && !e.action.toLowerCase().includes(search.toLowerCase())) return false;
-    return true;
-  });
-
-  const exportToExcel = () => {
-    const wb = XLSX.utils.book_new();
-    const sheet = filtered.map((e) => ({
-      Date: new Date(e.at).toLocaleString(),
-      Actor: e.actor,
-      Action: e.action,
-      Details: e.details ? JSON.stringify(e.details) : "",
-    }));
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Audit Log");
-    XLSX.writeFile(wb, `parijat-cafe-audit-log-${today()}.xlsx`);
-  };
-
-  return (
-    <div>
-      <Card style={{ padding: 18, marginBottom: 20 }}>
-        <div style={{ fontSize: 12.5, color: T.plum }}>
-          A running record of sensitive actions — logins, discounts, voids, cash movements, staff changes, and business day open/close. This is app-level logging (see the Security notes your developer flagged) — good for accountability and catching mistakes, not a substitute for full database-level security.
-        </div>
-      </Card>
-
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <div style={{ position: "relative" }}>
-            <Search size={14} style={{ position: "absolute", left: 10, top: 10, color: T.plum, opacity: 0.5 }} />
-            <input style={{ ...inputStyle, paddingLeft: 30, width: 220 }} placeholder="Search by staff or action…" value={search} onChange={(e) => setSearch(e.target.value)} />
-          </div>
-          <select style={{ ...inputStyle, width: 200 }} value={actionFilter} onChange={(e) => setActionFilter(e.target.value)}>
-            {actionOptions.map((a) => <option key={a} value={a}>{a === "all" ? "All actions" : a}</option>)}
-          </select>
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <Btn variant="ghost" onClick={refresh}>Refresh</Btn>
-          <Btn variant="primary" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
-        </div>
-      </div>
-
-      <Card style={{ padding: 0, overflow: "hidden" }}>
-        {loading ? (
-          <Empty text="Loading audit log…" />
-        ) : filtered.length === 0 ? (
-          <Empty text="No matching audit entries yet." />
-        ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}>
-              <th style={{ padding: "10px 14px" }}>When</th><th>Staff</th><th>Action</th><th>Details</th>
-            </tr></thead>
-            <tbody>
-              {filtered.map((e) => (
-                <tr key={e.id} style={{ borderTop: `1px solid ${T.line}` }}>
-                  <td style={{ padding: "9px 14px", opacity: 0.7, whiteSpace: "nowrap" }}>{new Date(e.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</td>
-                  <td style={{ fontWeight: 600 }}>{e.actor || "—"}</td>
-                  <td><Pill tone={actionTone(e.action)}>{e.action}</Pill></td>
-                  <td style={{ fontSize: 12, color: T.plum, opacity: 0.85, maxWidth: 360 }}>
-                    {e.details ? Object.entries(e.details).filter(([k]) => k !== "message").map(([k, v]) => `${k}: ${v}`).join(" · ") : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Card>
-    </div>
-  );
-}
-
 function StaffManagement({ staff, refreshStaff, currentUser }) {
   const [modal, setModal] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -3058,7 +2662,6 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
   const save = async () => {
     if (!form.name || !form.username) return;
     if (!editing && !form.password) { alert("Set a password for the new account."); return; }
-    if (form.password && form.password.length < 6) { alert("Password must be at least 6 characters."); return; }
     const usernameTaken = staff.some((s) => s.username.toLowerCase() === form.username.trim().toLowerCase() && s.id !== editing);
     if (usernameTaken) { alert("That username is already taken — pick another."); return; }
     setSaving(true);
@@ -3068,32 +2671,20 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
       if (form.password) {
         const { error: pwErr } = await supabase.rpc("update_staff_password", { p_id: editing, p_password: form.password });
         if (pwErr) { alert("Name/role saved, but password update failed: " + pwErr.message); }
-        else logAudit(currentUser.name, "STAFF_PASSWORD_RESET", { targetId: editing, targetName: form.name });
       }
-      logAudit(currentUser.name, "STAFF_UPDATED", { targetId: editing, name: form.name, username: form.username, role: form.role });
     } else {
-      const { error } = await supabase.rpc("create_staff", { p_name: form.name, p_username: form.username, p_password: form.password, p_role: form.role, p_must_change_password: true });
+      const { error } = await supabase.rpc("create_staff", { p_name: form.name, p_username: form.username, p_password: form.password, p_role: form.role });
       if (error) { alert("Couldn't create account: " + error.message); setSaving(false); return; }
-      logAudit(currentUser.name, "STAFF_CREATED", { name: form.name, username: form.username, role: form.role });
     }
     await refreshStaff();
     setSaving(false);
     setModal(false);
   };
 
-  const forceReset = async (s) => {
-    if (!confirm(`Force ${s.name} to set a new password at their next login?`)) return;
-    const { error } = await supabase.rpc("flag_must_change_password", { p_id: s.id });
-    if (error) { alert("Couldn't flag account: " + error.message); return; }
-    logAudit(currentUser.name, "STAFF_FORCED_RESET", { targetId: s.id, targetName: s.name });
-    alert(`${s.name} will be asked to set a new password next time they log in.`);
-  };
-
   const toggleActive = async (s) => {
     if (s.id === currentUser.id) { alert("You can't deactivate the account you're currently signed in with."); return; }
     const { error } = await supabase.rpc("set_staff_active", { p_id: s.id, p_active: !s.active });
     if (error) { alert("Couldn't update status: " + error.message); return; }
-    logAudit(currentUser.name, s.active ? "STAFF_DEACTIVATED" : "STAFF_REACTIVATED", { targetId: s.id, targetName: s.name });
     await refreshStaff();
   };
   const remove = async (s) => {
@@ -3102,7 +2693,6 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
     if (s.role === "owner" && owners.length <= 1) { alert("At least one active Owner account must remain."); return; }
     const { error } = await supabase.rpc("delete_staff", { p_id: s.id });
     if (error) { alert("Couldn't remove account: " + error.message); return; }
-    logAudit(currentUser.name, "STAFF_DELETED", { targetId: s.id, targetName: s.name });
     await refreshStaff();
   };
 
@@ -3117,9 +2707,9 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
             <div key={r.id}>
               <Pill tone={roleTone[r.id]}>{r.label}</Pill>
               <div style={{ color: T.plum, marginTop: 6, lineHeight: 1.5 }}>
-                {r.id === "owner" && "Full access — every module, plus Staff & Roles and the Audit Log."}
-                {r.id === "manager" && "Everything except Staff & Roles and the Audit Log."}
-                {r.id === "cashier" && "Orders, Tables, Accounting, CRM, Sales, QR/Online, Loyalty, Refer, Credit Book."}
+                {r.id === "owner" && "Full access — every module, plus Staff & Roles."}
+                {r.id === "manager" && "Everything except Staff & Roles."}
+                {r.id === "cashier" && "Orders, Tables, Accounting, CRM, Sales, QR/Online, Loyalty, Refer."}
                 {r.id === "barista" && "Kitchen Display and Order & KOT only."}
               </div>
             </div>
@@ -3148,7 +2738,6 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
                   <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                     <button onClick={() => openEdit(s)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.plum }}>Edit</button>
                     <button onClick={() => toggleActive(s)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.plum }}>{s.active ? "Deactivate" : "Reactivate"}</button>
-                    <button onClick={() => forceReset(s)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.plum }}>Force Reset</button>
                     <button onClick={() => remove(s)} style={{ background: "none", border: "none", cursor: "pointer", color: T.red }}><Trash2 size={13} /></button>
                   </div>
                 </td>
