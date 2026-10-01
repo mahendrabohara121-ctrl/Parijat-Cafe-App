@@ -3,7 +3,7 @@ import {
   LayoutDashboard, ClipboardList, LayoutGrid, Package, Wallet, UtensilsCrossed,
   Users, ChefHat, BarChart3, QrCode, ShoppingBag, Gift, Share2, Plus, X, Trash2,
   Check, Clock, Flame, AlertTriangle, TrendingUp, TrendingDown, Search, Menu as MenuIcon, Shield, Eye, EyeOff, LogOut, Truck,
-  CalendarDays, Lock, Unlock, CheckCircle2, CreditCard
+  CalendarDays, Lock, Unlock, CheckCircle2, CreditCard, Printer
 } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -267,6 +267,196 @@ async function fetchAuditLog(limit = 500) {
   return data;
 }
 
+/* ---------------- printable day-close report ---------------- */
+const PAYMENT_LABELS = {
+  cash: "Cash", fonepay: "FonePay", esewa: "eSewa", khalti: "Khalti",
+  card: "Card", bank: "Bank Transfer", credit: "Credit",
+};
+
+function buildDayCloseReportHtml(businessDate, day, orders, expenses, purchases, cashDeposits, creditTransactions) {
+  const paidOrders = orders.filter((o) => o.status === "paid" && (o.paidAt || o.createdAt || "").slice(0, 10) === businessDate);
+  const voidedToday = orders.filter((o) => o.status === "cancelled" && o.cancelledFromPaid && (o.paidAt || o.createdAt || "").slice(0, 10) === businessDate);
+  const dayExpenses = expenses.filter((e) => e.date === businessDate);
+  const dayPurchases = purchases.filter((p) => p.date === businessDate);
+  const dayDeposits = cashDeposits.filter((d) => d.date === businessDate);
+  const dayCredit = (creditTransactions || []).filter((c) => c.date === businessDate);
+
+  const totalSales = paidOrders.reduce((s, o) => s + Number(o.total || 0), 0);
+  const totalDiscount = paidOrders.reduce((s, o) => s + Number(o.discount || 0), 0);
+  const totalExpense = dayExpenses.reduce((s, e) => s + Number(e.amount || 0), 0);
+  const totalPurchase = dayPurchases.reduce((s, p) => s + Number(p.totalCost || 0), 0);
+  const netForDay = totalSales - totalExpense - totalPurchase;
+
+  const methodBreakdown = Object.keys(PAYMENT_LABELS)
+    .filter((id) => id !== "credit")
+    .map((id) => ({
+      label: PAYMENT_LABELS[id],
+      count: paidOrders.filter((o) => o.paymentMethod === id).length,
+      total: paidOrders.filter((o) => o.paymentMethod === id).reduce((s, o) => s + Number(o.total || 0), 0),
+    }))
+    .filter((p) => p.count > 0);
+
+  const cashSales = paidOrders.filter((o) => o.paymentMethod === "cash").reduce((s, o) => s + Number(o.total || 0), 0);
+  const cashExpenses = dayExpenses.filter((e) => e.paymentMethod === "cash").reduce((s, e) => s + Number(e.amount || 0), 0);
+  const cashPurchases = dayPurchases.filter((p) => p.paymentMethod === "cash").reduce((s, p) => s + Number(p.totalCost || 0), 0);
+  const cashDeposited = dayDeposits.reduce((s, d) => s + Number(d.amount || 0), 0);
+  const expectedCash = Number(day.openingCash || 0) + cashSales - cashExpenses - cashPurchases - cashDeposited;
+  const actualCash = Number(day.actualClosingCash || 0);
+  const cashDifference = actualCash - expectedCash;
+
+  const creditSalesToday = dayCredit.filter((c) => c.type === "sale").reduce((s, c) => s + Number(c.amount || 0), 0);
+  const creditRepaidToday = dayCredit.filter((c) => c.type === "repayment").reduce((s, c) => s + Number(c.amount || 0), 0);
+
+  const topItems = (() => {
+    const map = {};
+    paidOrders.forEach((o) => o.items.forEach((it) => { map[it.name] = (map[it.name] || 0) + it.qty; }));
+    return Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  })();
+
+  const expenseByCategory = (() => {
+    const map = {};
+    dayExpenses.forEach((e) => { map[e.category] = (map[e.category] || 0) + Number(e.amount || 0); });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  })();
+
+  const fmtMoney = (n) => "Rs " + Number(n || 0).toLocaleString("en-IN");
+  const fmtTime = (iso) => iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
+  const fmtDateLong = new Date(`${businessDate}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", day: "2-digit", month: "long", year: "numeric" });
+  const generatedAt = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+
+  const row = (a, b) => `<tr><td>${a}</td><td class="num">${b}</td></tr>`;
+  const section = (title, inner) => `<div class="section"><h2>${title}</h2>${inner}</div>`;
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Day Close Report — ${businessDate}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; color: #14213D; max-width: 720px; margin: 0 auto; padding: 28px 24px; font-size: 13px; }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  .sub { color: #6B7280; font-size: 12.5px; margin-bottom: 18px; }
+  .meta { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; padding: 12px 14px; background: #F6F8FB; border-radius: 8px; }
+  .meta div { font-size: 12px; }
+  .meta strong { display: block; font-size: 13.5px; color: #14213D; }
+  .section { margin-bottom: 20px; page-break-inside: avoid; }
+  .section h2 { font-size: 14px; border-bottom: 2px solid #14213D; padding-bottom: 4px; margin-bottom: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  td, th { padding: 5px 4px; border-bottom: 1px solid #E6E9F0; text-align: left; }
+  td.num, th.num { text-align: right; }
+  tr.total td { font-weight: 700; border-top: 2px solid #14213D; border-bottom: none; }
+  .status-open { color: #15803D; font-weight: 700; }
+  .status-closed { color: #991B1B; font-weight: 700; }
+  .diff-ok { color: #15803D; font-weight: 700; }
+  .diff-bad { color: #B91C1C; font-weight: 700; }
+  .signatures { display: flex; justify-content: space-between; margin-top: 40px; }
+  .sig { width: 45%; text-align: center; }
+  .sig .line { border-top: 1px solid #14213D; margin-top: 40px; padding-top: 6px; font-size: 11.5px; color: #6B7280; }
+  .footer { margin-top: 24px; font-size: 10.5px; color: #9CA3AF; text-align: center; }
+  .empty { color: #9CA3AF; font-style: italic; font-size: 12px; }
+  @media print { body { padding: 0; } }
+</style>
+</head>
+<body>
+  <h1>Parijat Cafe — Day Close Report</h1>
+  <div class="sub">${fmtDateLong}</div>
+
+  <div class="meta">
+    <div>Status<strong class="${day.status === "open" ? "status-open" : "status-closed"}">${day.status === "open" ? "OPEN" : "CLOSED"}</strong></div>
+    <div>Opened<strong>${fmtTime(day.openedAt)} by ${day.openedBy || "—"}</strong></div>
+    <div>Closed<strong>${day.closedAt ? fmtTime(day.closedAt) + " by " + (day.closedBy || "—") : "—"}</strong></div>
+    <div>Opening Cash<strong>${fmtMoney(day.openingCash)}</strong></div>
+  </div>
+
+  ${section("Sales Summary", `
+    <table>
+      <tr><th>Payment Method</th><th class="num">Orders</th><th class="num">Amount</th></tr>
+      ${methodBreakdown.length ? methodBreakdown.map((m) => `<tr><td>${m.label}</td><td class="num">${m.count}</td><td class="num">${fmtMoney(m.total)}</td></tr>`).join("") : `<tr><td colspan="3" class="empty">No sales recorded for this date.</td></tr>`}
+      <tr class="total"><td>Total Sales</td><td class="num">${paidOrders.length}</td><td class="num">${fmtMoney(totalSales)}</td></tr>
+    </table>
+  `)}
+
+  ${section("Cash Reconciliation", `
+    <table>
+      ${row("Opening Cash in Drawer", fmtMoney(day.openingCash))}
+      ${row("+ Cash Sales", fmtMoney(cashSales))}
+      ${row("− Cash Expenses", fmtMoney(cashExpenses))}
+      ${row("− Cash Purchases", fmtMoney(cashPurchases))}
+      ${row("− Cash Deposited to Bank", fmtMoney(cashDeposited))}
+      <tr class="total">${row("Expected Closing Cash", fmtMoney(expectedCash)).replace("<tr>", "").replace("</tr>", "")}</tr>
+      ${row("Actual Cash Counted", day.status === "closed" ? fmtMoney(actualCash) : "Not yet closed")}
+      ${day.status === "closed" ? `<tr><td>Difference</td><td class="num ${cashDifference === 0 ? "diff-ok" : "diff-bad"}">${fmtMoney(cashDifference)}${cashDifference === 0 ? " (matches)" : ""}</td></tr>` : ""}
+    </table>
+    ${day.closeNotes ? `<div style="margin-top:8px;font-size:12px;"><strong>Closing notes:</strong> ${day.closeNotes}</div>` : ""}
+  `)}
+
+  ${section("Discounts &amp; Credit", `
+    <table>
+      ${row("Total Discounts Given", fmtMoney(totalDiscount))}
+      ${row("Credit Sales Today", fmtMoney(creditSalesToday))}
+      ${row("Credit Repayments Received Today", fmtMoney(creditRepaidToday))}
+    </table>
+  `)}
+
+  ${section("Expenses", `
+    <table>
+      <tr><th>Category</th><th class="num">Amount</th></tr>
+      ${expenseByCategory.length ? expenseByCategory.map(([cat, amt]) => `<tr><td>${cat}</td><td class="num">${fmtMoney(amt)}</td></tr>`).join("") : `<tr><td colspan="2" class="empty">No expenses recorded.</td></tr>`}
+      <tr class="total"><td>Total Expenses</td><td class="num">${fmtMoney(totalExpense)}</td></tr>
+    </table>
+  `)}
+
+  ${section("Purchases", `
+    <table>
+      ${row("Total Purchase Spend", fmtMoney(totalPurchase))}
+      ${row("Purchase Entries", dayPurchases.length)}
+    </table>
+  `)}
+
+  ${section("Top Selling Items", `
+    <table>
+      <tr><th>Item</th><th class="num">Qty Sold</th></tr>
+      ${topItems.length ? topItems.map(([name, qty]) => `<tr><td>${name}</td><td class="num">${qty}</td></tr>`).join("") : `<tr><td colspan="2" class="empty">No items sold.</td></tr>`}
+    </table>
+  `)}
+
+  ${voidedToday.length ? section("Voided Bills (after payment)", `
+    <table>
+      <tr><th>Table</th><th class="num">Amount</th><th>Reason</th><th>Voided By</th></tr>
+      ${voidedToday.map((o) => `<tr><td>${o.tableName}</td><td class="num">${fmtMoney(o.total)}</td><td>${o.cancelReason || "—"}</td><td>${o.voidedBy || "—"}</td></tr>`).join("")}
+    </table>
+  `) : ""}
+
+  ${section("Net for the Day", `
+    <table>
+      ${row("Total Sales", fmtMoney(totalSales))}
+      ${row("− Total Expenses", fmtMoney(totalExpense))}
+      ${row("− Total Purchases", fmtMoney(totalPurchase))}
+      <tr class="total">${row("Net", fmtMoney(netForDay)).replace("<tr>", "").replace("</tr>", "")}</tr>
+    </table>
+  `)}
+
+  <div class="signatures">
+    <div class="sig"><div class="line">Prepared by (Cashier/Manager)</div></div>
+    <div class="sig"><div class="line">Verified by (Owner/Manager)</div></div>
+  </div>
+
+  <div class="footer">Generated ${generatedAt} · Parijat Cafe POS</div>
+
+  <script>window.onload = function() { window.print(); };</script>
+</body>
+</html>`;
+}
+
+function printDayCloseReport(businessDate, day, orders, expenses, purchases, cashDeposits, creditTransactions) {
+  const html = buildDayCloseReportHtml(businessDate, day, orders, expenses, purchases, cashDeposits, creditTransactions);
+  const win = window.open("", "_blank");
+  if (!win) { alert("Please allow pop-ups for this site to print the report."); return; }
+  win.document.write(html);
+  win.document.close();
+}
+
 /* ---------------- small UI atoms ---------------- */
 function Pill({ children, tone = "neutral" }) {
   const tones = {
@@ -463,7 +653,7 @@ const getBusinessDay = (days, date) => days[date] || {
 };
 
 function BusinessDayControl({
-  businessDate, businessDay, orders, expenses, purchases, cashDeposits, currentUser,
+  businessDate, businessDay, orders, expenses, purchases, cashDeposits, creditTransactions, currentUser,
   onChangeDate, onOpenDay, onCloseDay, onReopenDay,
 }) {
   const [openModal, setOpenModal] = useState(false);
@@ -502,6 +692,7 @@ function BusinessDayControl({
           <div style={{ fontSize: 12.5, fontWeight: 700, color: T.dusk }}>{formatDay(businessDate)}</div>
         </div>
         <Pill tone={businessDay.status === "open" ? "good" : "bad"}>{businessDay.status === "open" ? "● Day Open" : "● Day Closed"}</Pill>
+        <Btn variant="ghost" onClick={() => printDayCloseReport(businessDate, businessDay, orders, expenses, purchases, cashDeposits, creditTransactions)}><Printer size={14} /> Print Report</Btn>
         {businessDay.status === "open" ? (
           <Btn variant="danger" onClick={() => { setActualCash(""); setCloseNotes(""); setCloseModal(true); }}><Lock size={14} /> Close Day</Btn>
         ) : (
@@ -555,8 +746,15 @@ function BusinessDayControl({
               const amount = Number(actualCash);
               if (!Number.isFinite(amount) || amount < 0) return alert("Enter the actual cash counted.");
               onCloseDay(amount, closeNotes, { expectedCash, totalSales, paidOrders: paidOrders.length, cashSales, cashExpenses, cashPurchases, cashDeposited });
+              // print the report using the just-entered actual cash, even though state
+              // hasn't re-rendered with the closed status yet
+              printDayCloseReport(
+                businessDate,
+                { ...businessDay, status: "closed", actualClosingCash: amount, closeNotes },
+                orders, expenses, purchases, cashDeposits, creditTransactions
+              );
               setCloseModal(false);
-            }}><Lock size={14} /> Confirm Close Day</Btn>
+            }}><Lock size={14} /> Confirm Close Day &amp; Print</Btn>
           </div>
         </Modal>
       )}
@@ -682,8 +880,20 @@ export default function App() {
 
   // --- realtime sync: keeps every open screen/device in sync live, instead of only
   // loading once on mount. Without this, two staff on two devices can silently
-  // overwrite each other's changes to the same order or table. ---
+  // overwrite each other's changes to the same order or table.
+  //
+  // Realtime channels can drop (network blips, Supabase-side hiccups, etc.) and
+  // supabase-js does NOT automatically rejoin a channel that errored out — only
+  // the underlying socket reconnects. So without explicit handling here, one
+  // dropped connection means the app silently stops receiving live updates
+  // until a manual refresh. This sets up auto-reconnect with backoff so a
+  // transient blip recovers on its own within a few seconds. ---
   useEffect(() => {
+    let channel = null;
+    let reconnectTimer = null;
+    let attempt = 0;
+    let cancelled = false;
+
     const applyChange = (setter, fromDb) => (payload) => {
       setter((prev) => {
         if (payload.eventType === "DELETE") {
@@ -698,19 +908,55 @@ export default function App() {
       });
     };
 
-    const channel = supabase
-      .channel("parijat-pos-realtime")
-      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, applyChange(setOrders, TABLE_MAP.orders.fromDb))
-      .on("postgres_changes", { event: "*", schema: "public", table: "dining_tables" }, applyChange(setTables, TABLE_MAP.tables.fromDb))
-      .on("postgres_changes", { event: "*", schema: "public", table: "menu_items" }, applyChange(setMenu, TABLE_MAP.menu.fromDb))
-      .on("postgres_changes", { event: "*", schema: "public", table: "inventory_items" }, applyChange(setInventory, TABLE_MAP.inventory.fromDb))
-      .subscribe((status) => {
-        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-          pushToast("Live sync disconnected — other devices' changes may not appear until you refresh.", "warn", 8000);
-        }
-      });
+    const connect = () => {
+      if (cancelled) return;
+      if (channel) { supabase.removeChannel(channel); }
 
-    return () => { supabase.removeChannel(channel); };
+      channel = supabase
+        .channel("parijat-pos-realtime-" + Date.now()) // unique name per attempt avoids stale-topic reuse issues
+        .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, applyChange(setOrders, TABLE_MAP.orders.fromDb))
+        .on("postgres_changes", { event: "*", schema: "public", table: "dining_tables" }, applyChange(setTables, TABLE_MAP.tables.fromDb))
+        .on("postgres_changes", { event: "*", schema: "public", table: "menu_items" }, applyChange(setMenu, TABLE_MAP.menu.fromDb))
+        .on("postgres_changes", { event: "*", schema: "public", table: "inventory_items" }, applyChange(setInventory, TABLE_MAP.inventory.fromDb))
+        .subscribe((status) => {
+          if (cancelled) return;
+          if (status === "SUBSCRIBED") {
+            if (attempt > 0) pushToast("Live sync reconnected.", "success", 3000);
+            attempt = 0; // reset backoff once we're healthy again
+            return;
+          }
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+            attempt += 1;
+            const delay = Math.min(30000, 1000 * 2 ** attempt); // 2s, 4s, 8s... capped at 30s
+            if (attempt === 1) {
+              pushToast("Live sync disconnected — trying to reconnect…", "warn", delay + 2000);
+            }
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(connect, delay);
+          }
+        });
+    };
+
+    connect();
+
+    // Fallback safety net: even if the WebSocket never connects at all (blocked
+    // by a firewall/antivirus, or an extended outage), silently re-fetch the
+    // live-critical tables every 15s so the app still converges on its own
+    // without anyone needing to manually refresh.
+    const pollInterval = setInterval(async () => {
+      const [freshOrders, freshTables] = await Promise.all([fetchTable("orders"), fetchTable("tables")]);
+      if (!cancelled) {
+        setOrders(freshOrders);
+        setTables(freshTables);
+      }
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (channel) supabase.removeChannel(channel);
+      clearInterval(pollInterval);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -956,6 +1202,7 @@ export default function App() {
               expenses={expenses}
               purchases={purchases}
               cashDeposits={cashDeposits}
+              creditTransactions={creditTransactions}
               currentUser={currentUser}
               onChangeDate={setBusinessDate}
               onOpenDay={openBusinessDay}
