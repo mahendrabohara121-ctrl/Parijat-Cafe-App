@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   LayoutDashboard, ClipboardList, LayoutGrid, Package, Wallet, UtensilsCrossed,
   Users, ChefHat, BarChart3, QrCode, ShoppingBag, Gift, Share2, Plus, X, Trash2,
@@ -240,7 +240,7 @@ let lastLocalWriteAt = 0;
 const hasPendingSync = () => Object.keys(syncQueues).length > 0;
 
 async function syncTable(key, oldArr, newArr) {
-  const run = async () => {
+  const runInner = async () => {
     const { table, toDb } = TABLE_MAP[key];
     const newIds = new Set(newArr.map((r) => r.id));
     const toDelete = oldArr.filter((r) => !newIds.has(r.id)).map((r) => r.id);
@@ -253,6 +253,11 @@ async function syncTable(key, oldArr, newArr) {
       if (error) { console.error("delete failed", table, error); return { ok: false, error }; }
     }
     return { ok: true };
+  };
+  // never let an unexpected exception vanish: report it as a failed save so the UI rolls back AND tells the user
+  const run = async () => {
+    try { return await runInner(); }
+    catch (e) { console.error("sync crashed", key, e); return { ok: false, error: e }; }
   };
 
   const previous = syncQueues[key] || Promise.resolve();
@@ -861,6 +866,22 @@ export default function App() {
   const [businessDate, setBusinessDate] = useState(today());
   const [businessDays, setBusinessDays] = useState({});
 
+  // Always-current copy of every synced list. makePersist reads "before" from here instead of
+  // from inside a setState updater (React may delay updaters, which used to make saves silently fail).
+  const liveRef = useRef({});
+  useEffect(() => { liveRef.current.menu = menu; }, [menu]);
+  useEffect(() => { liveRef.current.tables = tables; }, [tables]);
+  useEffect(() => { liveRef.current.orders = orders; }, [orders]);
+  useEffect(() => { liveRef.current.inventory = inventory; }, [inventory]);
+  useEffect(() => { liveRef.current.inventoryMovements = inventoryMovements; }, [inventoryMovements]);
+  useEffect(() => { liveRef.current.waste = waste; }, [waste]);
+  useEffect(() => { liveRef.current.expenses = expenses; }, [expenses]);
+  useEffect(() => { liveRef.current.customers = customers; }, [customers]);
+  useEffect(() => { liveRef.current.referrals = referrals; }, [referrals]);
+  useEffect(() => { liveRef.current.purchases = purchases; }, [purchases]);
+  useEffect(() => { liveRef.current.cashDeposits = cashDeposits; }, [cashDeposits]);
+  useEffect(() => { liveRef.current.creditTransactions = creditTransactions; }, [creditTransactions]);
+
   // --- toasts: surfaces save/sync failures instead of swallowing them silently ---
   const [toasts, setToasts] = useState([]);
   const pushToast = (message, tone = "error", timeoutMs = 6000) => {
@@ -1039,19 +1060,17 @@ export default function App() {
   // roll the local state back to what it was before, so the UI never lies about what
   // actually got saved.
   const makePersist = (key, setState) => (valueOrUpdater) => {
-    let prev;
-    let next;
+    const prev = liveRef.current[key] || [];
+    const next = typeof valueOrUpdater === "function" ? valueOrUpdater(prev) : valueOrUpdater;
+    liveRef.current[key] = next;      // chain rapid clicks off the newest value immediately
     lastLocalWriteAt = Date.now();
-    setState((current) => {
-      prev = current;
-      next = typeof valueOrUpdater === "function" ? valueOrUpdater(current) : valueOrUpdater;
-      return next;
-    });
+    setState(next);
     syncTable(key, prev, next).then((res) => {
       lastLocalWriteAt = Date.now();
       if (!res.ok) {
-        setState(() => prev); // roll back — the save didn't actually happen
-        pushToast(`Couldn't save your last change to ${TABLE_MAP[key].table.replace(/_/g, " ")}. It's been reverted — please try again.`, "error");
+        liveRef.current[key] = prev;
+        setState(prev); // roll back — the save didn't actually happen
+        pushToast(`Couldn't save your last change to ${TABLE_MAP[key].table.replace(/_/g, " ")}. It's been reverted — please try again.${res.error?.message ? " (" + res.error.message + ")" : ""}`, "error");
       }
     });
   };
