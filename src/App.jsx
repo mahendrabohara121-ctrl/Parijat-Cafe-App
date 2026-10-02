@@ -39,29 +39,48 @@ const uid = () => {
 const money = (n) => "Rs " + Number(n || 0).toLocaleString("en-IN");
 const today = () => new Date().toISOString().slice(0, 10);
 
+/* ---------------- purchase categories & accounting treatment ---------------- */
+const PURCHASE_CATEGORIES = [
+  "Food Ingredients",
+  "Beverage Ingredients",
+  "Cigarettes & Tobacco",
+  "Packaging",
+  "Cleaning & Hygiene",
+  "Office & Stationery",
+  "Utilities",
+  "Equipment & Smallwares",
+  "Maintenance",
+  "Other",
+];
+
+const PURCHASE_COST_TYPES = [
+  { id: "cogs", label: "Stock / Cost of Goods" },
+  { id: "operating", label: "Operating / Other Purchase" },
+];
+
 /* ---------------- seed data ---------------- */
 const SEED_MENU = [
-  { id: uid(), name: "Dusk Pour-Over", category: "Coffee & Brews", price: 320, veg: true, available: true, station: "bar" },
-  { id: uid(), name: "Parijat Cardamom Latte", category: "Coffee & Brews", price: 280, veg: true, available: true, station: "bar" },
-  { id: uid(), name: "Himalayan Cold Brew", category: "Coffee & Brews", price: 260, veg: true, available: true, station: "bar" },
-  { id: uid(), name: "Masala Chiya", category: "Coffee & Brews", price: 150, veg: true, available: true, station: "bar" },
-  { id: uid(), name: "Sekuwa Skewers", category: "Small Plates", price: 420, veg: false, available: true, station: "kitchen" },
-  { id: uid(), name: "Momo Trio", category: "Small Plates", price: 380, veg: false, available: true, station: "kitchen" },
-  { id: uid(), name: "Aloo Sadeko Toast", category: "Small Plates", price: 240, veg: true, available: true, station: "kitchen" },
-  { id: uid(), name: "Sel Roti Stack", category: "Sweet", price: 260, veg: true, available: true, station: "kitchen" },
-  { id: uid(), name: "Malai Cheesecake", category: "Sweet", price: 340, veg: true, available: true, station: "kitchen" },
-  { id: uid(), name: "Jasmine Kulfi", category: "Sweet", price: 220, veg: true, available: true, station: "bar" },
+  { id: uid(), name: "Dusk Pour-Over", category: "Coffee & Brews", price: 320, veg: true, available: true, station: "bar", recipe: [] },
+  { id: uid(), name: "Parijat Cardamom Latte", category: "Coffee & Brews", price: 280, veg: true, available: true, station: "bar", recipe: [] },
+  { id: uid(), name: "Himalayan Cold Brew", category: "Coffee & Brews", price: 260, veg: true, available: true, station: "bar", recipe: [] },
+  { id: uid(), name: "Masala Chiya", category: "Coffee & Brews", price: 150, veg: true, available: true, station: "bar", recipe: [] },
+  { id: uid(), name: "Sekuwa Skewers", category: "Small Plates", price: 420, veg: false, available: true, station: "kitchen", recipe: [] },
+  { id: uid(), name: "Momo Trio", category: "Small Plates", price: 380, veg: false, available: true, station: "kitchen", recipe: [] },
+  { id: uid(), name: "Aloo Sadeko Toast", category: "Small Plates", price: 240, veg: true, available: true, station: "kitchen", recipe: [] },
+  { id: uid(), name: "Sel Roti Stack", category: "Sweet", price: 260, veg: true, available: true, station: "kitchen", recipe: [] },
+  { id: uid(), name: "Malai Cheesecake", category: "Sweet", price: 340, veg: true, available: true, station: "kitchen", recipe: [] },
+  { id: uid(), name: "Jasmine Kulfi", category: "Sweet", price: 220, veg: true, available: true, station: "bar", recipe: [] },
 ];
 const SEED_TABLES = Array.from({ length: 10 }, (_, i) => ({
   id: uid(), name: "T" + (i + 1), capacity: i % 3 === 0 ? 2 : 4, status: "free", orderId: null,
 }));
 const SEED_INVENTORY = [
-  { id: uid(), name: "Coffee Beans (Arabica)", unit: "kg", stock: 8, reorder: 5 },
-  { id: uid(), name: "Whole Milk", unit: "L", stock: 14, reorder: 10 },
-  { id: uid(), name: "Chicken (for Sekuwa)", unit: "kg", stock: 3, reorder: 4 },
-  { id: uid(), name: "Momo Flour", unit: "kg", stock: 12, reorder: 6 },
-  { id: uid(), name: "Cardamom", unit: "g", stock: 400, reorder: 200 },
-  { id: uid(), name: "Cream Cheese", unit: "kg", stock: 2, reorder: 3 },
+  { id: uid(), name: "Coffee Beans (Arabica)", unit: "kg", stock: 8, reorder: 5, avgCost: 0 },
+  { id: uid(), name: "Whole Milk", unit: "L", stock: 14, reorder: 10, avgCost: 0 },
+  { id: uid(), name: "Chicken (for Sekuwa)", unit: "kg", stock: 3, reorder: 4, avgCost: 0 },
+  { id: uid(), name: "Momo Flour", unit: "kg", stock: 12, reorder: 6, avgCost: 0 },
+  { id: uid(), name: "Cardamom", unit: "g", stock: 400, reorder: 200, avgCost: 0 },
+  { id: uid(), name: "Cream Cheese", unit: "kg", stock: 2, reorder: 3, avgCost: 0 },
 ];
 const SEED_CUSTOMERS = [
   { id: uid(), name: "Anita Sharma", phone: "98xxxxxx01", visits: 12, points: 340, notes: "Prefers window seating", referralCode: "ANITA12" },
@@ -92,8 +111,8 @@ const SEED_STAFF = [
 const TABLE_MAP = {
   menu: {
     table: "menu_items",
-    toDb: (m) => ({ id: m.id, name: m.name, category: m.category, price: m.price, veg: m.veg, available: m.available, station: m.station || "kitchen" }),
-    fromDb: (r) => ({ id: r.id, name: r.name, category: r.category, price: Number(r.price), veg: r.veg, available: r.available, station: r.station || "kitchen" }),
+    toDb: (m) => ({ id: m.id, name: m.name, category: m.category, price: m.price, veg: m.veg, available: m.available, station: m.station || "kitchen", recipe: m.recipe || [] }),
+    fromDb: (r) => ({ id: r.id, name: r.name, category: r.category, price: Number(r.price), veg: r.veg, available: r.available, station: r.station || "kitchen", recipe: Array.isArray(r.recipe) ? r.recipe : [] }),
   },
   tables: {
     table: "dining_tables",
@@ -108,7 +127,7 @@ const TABLE_MAP = {
       payment_method: o.paymentMethod || null, created_at: o.createdAt, paid_at: o.paidAt || null,
       cancel_reason: o.cancelReason || null, cancelled_from_paid: !!o.cancelledFromPaid,
       subtotal: o.subtotal != null ? o.subtotal : o.total, discount: o.discount || 0,
-      discount_by: o.discountBy || null, voided_by: o.voidedBy || null,
+      discount_by: o.discountBy || null, voided_by: o.voidedBy || null, inventory_consumed_at: o.inventoryConsumedAt || null, cogs_total: Number(o.cogsTotal || 0),
     }),
     fromDb: (r) => ({
       id: r.id, tableId: r.table_id, tableName: r.table_name, items: r.items, total: Number(r.total),
@@ -116,13 +135,18 @@ const TABLE_MAP = {
       paymentMethod: r.payment_method, createdAt: r.created_at, paidAt: r.paid_at,
       cancelReason: r.cancel_reason, cancelledFromPaid: r.cancelled_from_paid,
       subtotal: r.subtotal != null ? Number(r.subtotal) : Number(r.total), discount: Number(r.discount || 0),
-      discountBy: r.discount_by, voidedBy: r.voided_by,
+      discountBy: r.discount_by, voidedBy: r.voided_by, inventoryConsumedAt: r.inventory_consumed_at, cogsTotal: Number(r.cogs_total || 0),
     }),
   },
   inventory: {
     table: "inventory_items",
-    toDb: (i) => ({ id: i.id, name: i.name, unit: i.unit, stock: i.stock, reorder: i.reorder }),
-    fromDb: (r) => ({ id: r.id, name: r.name, unit: r.unit, stock: Number(r.stock), reorder: Number(r.reorder) }),
+    toDb: (i) => ({ id: i.id, name: i.name, unit: i.unit, stock: i.stock, reorder: i.reorder, avg_cost: Number(i.avgCost || 0) }),
+    fromDb: (r) => ({ id: r.id, name: r.name, unit: r.unit, stock: Number(r.stock), reorder: Number(r.reorder), avgCost: Number(r.avg_cost || 0) }),
+  },
+  inventoryMovements: {
+    table: "inventory_movements",
+    toDb: (m) => ({ id: m.id, item_id: m.itemId, item_name: m.itemName, unit: m.unit, qty: m.qty, unit_cost: m.unitCost, total_cost: m.totalCost, type: m.type, order_id: m.orderId || null, menu_item_id: m.menuItemId || null, menu_item_name: m.menuItemName || null, date: m.date, created_at: m.createdAt || new Date().toISOString() }),
+    fromDb: (r) => ({ id: r.id, itemId: r.item_id, itemName: r.item_name, unit: r.unit, qty: Number(r.qty), unitCost: Number(r.unit_cost || 0), totalCost: Number(r.total_cost || 0), type: r.type, orderId: r.order_id, menuItemId: r.menu_item_id, menuItemName: r.menu_item_name, date: r.date, createdAt: r.created_at }),
   },
   waste: {
     table: "waste_log",
@@ -149,12 +173,12 @@ const TABLE_MAP = {
     toDb: (p) => ({
       id: p.id, item_id: p.itemId || null, item_name: p.itemName, quantity: p.quantity, unit: p.unit,
       unit_cost: p.unitCost, total_cost: p.totalCost, supplier: p.supplier || null, notes: p.notes || null, date: p.date,
-      payment_method: p.paymentMethod || "cash",
+      payment_method: p.paymentMethod || "cash", category: p.category || "Other", cost_type: p.costType || (p.itemId ? "cogs" : "operating"),
     }),
     fromDb: (r) => ({
       id: r.id, itemId: r.item_id, itemName: r.item_name, quantity: Number(r.quantity), unit: r.unit,
       unitCost: Number(r.unit_cost), totalCost: Number(r.total_cost), supplier: r.supplier, notes: r.notes, date: r.date,
-      paymentMethod: r.payment_method || "cash",
+      paymentMethod: r.payment_method || "cash", category: r.category || "Other", costType: r.cost_type || (r.item_id ? "cogs" : "operating"),
     }),
   },
   cashDeposits: {
@@ -180,12 +204,23 @@ const TABLE_MAP = {
 // fetch a whole table fresh from Supabase, mapped to the app's JS shape
 async function fetchTable(key) {
   const { table, fromDb } = TABLE_MAP[key];
-  const { data, error } = await supabase.from(table).select("*");
-  if (error) { console.error("fetch failed", table, error); return []; }
-  const rows = data.map(fromDb);
-  // Supabase doesn't guarantee row order without an explicit ORDER BY, so screens that assume
-  // chronological order (oldest-first, e.g. "take the last 6 = most recent") can silently break.
-  // Sort here, once, at the source, so every screen sees consistent chronological data.
+  // Supabase caps a single response (default 1000 rows). Page until an empty page so
+  // big tables (orders, inventory_movements) are never silently truncated.
+  const PAGE = 1000;
+  const all = [];
+  for (let from = 0; ; ) {
+    const { data, error } = await supabase.from(table).select("*").order("id", { ascending: true }).range(from, from + PAGE - 1);
+    if (error) {
+      console.error("fetch failed", table, error);
+      // Throw instead of returning [] — an empty array looks like "first run" and would re-seed demo data.
+      throw new Error(`Couldn't load ${table}: ${error.message}`);
+    }
+    if (!data.length) break;
+    all.push(...data);
+    from += data.length;
+  }
+  const rows = all.map(fromDb);
+  // Sort once at the source so every screen sees consistent chronological data.
   const sortKey = rows[0] && "createdAt" in rows[0] ? "createdAt" : (rows[0] && "date" in rows[0] ? "date" : null);
   if (sortKey) rows.sort((a, b) => new Date(a[sortKey]) - new Date(b[sortKey]));
   return rows;
@@ -800,6 +835,7 @@ function BusinessDayControl({
 /* ================= MAIN APP ================= */
 export default function App() {
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [active, setActive] = useState("overview");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState(null); // restored from localStorage after data loads, if a session exists
@@ -809,6 +845,7 @@ export default function App() {
   const [tables, setTables] = useState([]);
   const [orders, setOrders] = useState([]);
   const [inventory, setInventory] = useState([]);
+  const [inventoryMovements, setInventoryMovements] = useState([]);
   const [waste, setWaste] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [customers, setCustomers] = useState([]);
@@ -840,11 +877,13 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const [m, t, o, inv, w, exp, cust, ref, purch, deposits, credit, days] = await Promise.all([
+      try {
+      const [m, t, o, inv, invMov, w, exp, cust, ref, purch, deposits, credit, days] = await Promise.all([
         fetchTable("menu"),
         fetchTable("tables"),
         fetchTable("orders"),
         fetchTable("inventory"),
+        fetchTable("inventoryMovements"),
         fetchTable("waste"),
         fetchTable("expenses"),
         fetchTable("customers"),
@@ -859,6 +898,7 @@ export default function App() {
       setTables(t.length ? t : SEED_TABLES);
       setOrders(o);
       setInventory(inv.length ? inv : SEED_INVENTORY);
+      setInventoryMovements(invMov);
       setWaste(w);
       setExpenses(exp);
       setCustomers(cust.length ? cust : SEED_CUSTOMERS);
@@ -890,6 +930,12 @@ export default function App() {
       } catch (e) { /* localStorage unavailable — just skip session restore */ }
 
       setLoading(false);
+      } catch (e) {
+        // Do NOT seed or render a half-empty app: a failed load must never look like a fresh install.
+        console.error("initial load failed", e);
+        setLoadError(e.message || "Couldn't reach the database.");
+        setLoading(false);
+      }
     })();
   }, []);
 
@@ -933,6 +979,7 @@ export default function App() {
         .on("postgres_changes", { event: "*", schema: "public", table: "dining_tables" }, applyChange(setTables, TABLE_MAP.tables.fromDb))
         .on("postgres_changes", { event: "*", schema: "public", table: "menu_items" }, applyChange(setMenu, TABLE_MAP.menu.fromDb))
         .on("postgres_changes", { event: "*", schema: "public", table: "inventory_items" }, applyChange(setInventory, TABLE_MAP.inventory.fromDb))
+        .on("postgres_changes", { event: "*", schema: "public", table: "inventory_movements" }, applyChange(setInventoryMovements, TABLE_MAP.inventoryMovements.fromDb))
         .subscribe((status) => {
           if (cancelled) return;
           if (status === "SUBSCRIBED") {
@@ -959,11 +1006,13 @@ export default function App() {
     // live-critical tables every 15s so the app still converges on its own
     // without anyone needing to manually refresh.
     const pollInterval = setInterval(async () => {
-      const [freshOrders, freshTables] = await Promise.all([fetchTable("orders"), fetchTable("tables")]);
-      if (!cancelled) {
-        setOrders(freshOrders);
-        setTables(freshTables);
-      }
+      try {
+        const [freshOrders, freshTables] = await Promise.all([fetchTable("orders"), fetchTable("tables")]);
+        if (!cancelled) {
+          setOrders(freshOrders);
+          setTables(freshTables);
+        }
+      } catch (e) { /* transient network error: keep current screen, try again next tick */ }
     }, 15000);
 
     return () => {
@@ -1000,6 +1049,7 @@ export default function App() {
     tables: makePersist("tables", setTables),
     orders: makePersist("orders", setOrders),
     inventory: makePersist("inventory", setInventory),
+    inventoryMovements: makePersist("inventoryMovements", setInventoryMovements),
     waste: makePersist("waste", setWaste),
     expenses: makePersist("expenses", setExpenses),
     customers: makePersist("customers", setCustomers),
@@ -1012,6 +1062,31 @@ export default function App() {
       if (error) { pushToast("Couldn't refresh staff list: " + error.message, "error"); return; }
       setStaff(data || []);
     },
+  };
+
+  // After a server-side action (pay_order / void_order) the database is the source of truth.
+  // Re-read what it touched into LOCAL state only (raw setters — no write-back to Supabase).
+  const refreshAfterServerAction = async (orderId) => {
+    try {
+      const [o, t, inv, cust, cred] = await Promise.all([
+        fetchTable("orders"), fetchTable("tables"), fetchTable("inventory"),
+        fetchTable("customers"), fetchTable("creditTransactions"),
+      ]);
+      setOrders(o); setTables(t); setInventory(inv); setCustomers(cust); setCreditTransactions(cred);
+      if (orderId) {
+        const { data } = await supabase.from("inventory_movements").select("*").eq("order_id", orderId);
+        if (data && data.length) {
+          const rows = data.map(TABLE_MAP.inventoryMovements.fromDb);
+          setInventoryMovements((cur) => {
+            const byId = new Map(cur.map((r) => [r.id, r]));
+            rows.forEach((r) => byId.set(r.id, r));
+            return Array.from(byId.values());
+          });
+        }
+      }
+    } catch (e) {
+      pushToast("Saved on the server, but the screen couldn't refresh: " + e.message + " (reload the page).", "warn");
+    }
   };
 
   const currentBusinessDay = getBusinessDay(businessDays, businessDate);
@@ -1132,6 +1207,17 @@ export default function App() {
     try { localStorage.removeItem("parijat_session_id"); } catch (e) { /* ignore */ }
   };
 
+  if (loadError) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: 500, gap: 12, fontFamily: "sans-serif", color: T.ink, padding: 20, textAlign: "center" }}>
+        <div style={{ fontWeight: 700 }}>Couldn't load Parijat Cafe data</div>
+        <div style={{ fontSize: 13, color: T.plum, maxWidth: 420 }}>{loadError}</div>
+        <div style={{ fontSize: 12, color: T.plum }}>Nothing was changed. Check your connection and try again.</div>
+        <button onClick={() => window.location.reload()} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: T.dusk, color: "#fff", cursor: "pointer" }}>Retry</button>
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 500, fontFamily: "sans-serif", color: T.plum }}>
@@ -1240,13 +1326,13 @@ export default function App() {
             <div style={{ fontSize: 11.5, color: T.plum }}>{currentBusinessDay.status === "open" ? `Opened ${currentBusinessDay.openedAt ? new Date(currentBusinessDay.openedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}` : "POS and operational entries are locked."}</div>
           </div>
           {active === "overview" && <Overview orders={orders} tables={tables} inventory={inventory} expenses={expenses} customers={customers} businessDate={businessDate} />}
-          {active === "orders" && <Orders menu={menu} tables={tables} orders={orders} setOrders={persist.orders} setTables={persist.tables} customers={customers} setCustomers={persist.customers} currentUser={currentUser} businessDay={currentBusinessDay} creditTransactions={creditTransactions} setCreditTransactions={persist.creditTransactions} />}
+          {active === "orders" && <Orders menu={menu} tables={tables} orders={orders} setOrders={persist.orders} setTables={persist.tables} customers={customers} setCustomers={persist.customers} currentUser={currentUser} businessDay={currentBusinessDay} creditTransactions={creditTransactions} setCreditTransactions={persist.creditTransactions} inventory={inventory} setInventory={persist.inventory} purchases={purchases} inventoryMovements={inventoryMovements} refreshData={refreshAfterServerAction} />}
           {active === "kds" && <KDS orders={orders} setOrders={persist.orders} tables={tables} setTables={persist.tables} menu={menu} />}
           {active === "tables" && <TablesView tables={tables} setTables={persist.tables} orders={orders} />}
           {active === "purchase" && <PurchaseManagement purchases={purchases} setPurchases={persist.purchases} inventory={inventory} setInventory={persist.inventory} businessDay={currentBusinessDay} />}
           {active === "inventory" && <Inventory inventory={inventory} setInventory={persist.inventory} waste={waste} setWaste={persist.waste} businessDay={currentBusinessDay} />}
-          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} cashDeposits={cashDeposits} setCashDeposits={persist.cashDeposits} businessDay={currentBusinessDay} creditTransactions={creditTransactions} currentUser={currentUser} />}
-          {active === "menu" && <MenuManagement menu={menu} setMenu={persist.menu} />}
+          {active === "accounting" && <Accounting expenses={expenses} setExpenses={persist.expenses} orders={orders} purchases={purchases} cashDeposits={cashDeposits} setCashDeposits={persist.cashDeposits} businessDay={currentBusinessDay} creditTransactions={creditTransactions} currentUser={currentUser} inventoryMovements={inventoryMovements} />}
+          {active === "menu" && <MenuManagement menu={menu} setMenu={persist.menu} inventory={inventory} />}
           {active === "crm" && <CRM customers={customers} setCustomers={persist.customers} orders={orders} />}
           {active === "sales" && <SalesReport orders={orders} menu={menu} />}
           {active === "qr" && <QRMenu menu={menu} />}
@@ -1364,7 +1450,8 @@ const PAYMENT_METHODS = [
   { id: "credit", label: "Credit" },
 ];
 
-function Orders({ menu, tables, orders, setOrders, setTables, customers, setCustomers, currentUser, businessDay, creditTransactions, setCreditTransactions }) {
+
+function Orders({ menu, tables, orders, setOrders, setTables, customers, setCustomers, currentUser, businessDay, creditTransactions, setCreditTransactions, inventory, setInventory, purchases, inventoryMovements, refreshData }) {
   const canManageMoney = currentUser && (currentUser.role === "owner" || currentUser.role === "manager"); // Discount & Void Bill are Owner/Manager only
   const [modal, setModal] = useState(false);
   const [tableId, setTableId] = useState("");
@@ -1497,23 +1584,45 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     finalizeSettlement(order, method, customerOverride);
   };
 
-  const finalizeSettlement = (order, method, customerNameOverride) => {
-    const finalCustomerName = customerNameOverride || order.customerName;
-    setOrders((currentOrders) => currentOrders.map((o) => (o.id === order.id ? { ...o, status: "paid", paymentMethod: method, paidAt: new Date().toISOString(), customerName: finalCustomerName || o.customerName } : o)));
-    setTables(tables.map((t) => (t.id === order.tableId ? { ...t, status: "free", orderId: null } : t)));
-    // loyalty points: 1 point per Rs 100
-    const cust = customers.find((c) => c.name === finalCustomerName);
-    if (cust) {
-      setCustomers(customers.map((c) => c.id === cust.id ? { ...c, points: c.points + Math.floor(order.total / 100), visits: c.visits + 1 } : c));
+  const [paying, setPaying] = useState(false);
+
+  // Payment is ONE atomic server call: stock, ledger, COGS, table, loyalty, credit-book.
+  // The server is idempotent, so a double-tap can't deduct ingredients twice.
+  const finalizeSettlement = async (order, method, customerNameOverride, customerId = null) => {
+    if (paying) return false;
+    const freshOrder = orders.find((o) => o.id === order.id) || order;
+    if (freshOrder.status === "paid") { setPayOrder(null); return true; }
+    setPaying(true);
+    try {
+      const { data, error } = await supabase.rpc("pay_order", {
+        p_order_id: freshOrder.id,
+        p_method: method,
+        p_actor_id: currentUser?.id,
+        p_customer_name: customerNameOverride || freshOrder.customerName || null,
+        p_customer_id: customerId,
+      });
+      if (error) throw error;
+      logAudit(currentUser?.name, "ORDER_PAID", { orderId: freshOrder.id, total: freshOrder.total, paymentMethod: method, cogs: data?.cogs_total, inventoryLines: data?.movement_count });
+      await refreshData(freshOrder.id);
+      setPayOrder(null);
+      const warnings = [];
+      if (data?.negative_stock_items?.length) warnings.push("Stock went negative for: " + data.negative_stock_items.join(", ") + ". Check inventory counts.");
+      if (data?.uncosted_lines) warnings.push(data.uncosted_lines + " ingredient line(s) have no cost yet, so COGS for this bill is understated. Record a purchase for them.");
+      if (data?.skipped_lines) warnings.push(data.skipped_lines + " recipe ingredient(s) no longer exist in Inventory and were skipped.");
+      if (warnings.length) alert("Bill paid.\n\n" + warnings.join("\n\n"));
+      return true;
+    } catch (e) {
+      alert("Payment was NOT recorded: " + (e.message || e) + "\n\nNothing was changed. Please try again.");
+      return false;
+    } finally {
+      setPaying(false);
     }
-    setPayOrder(null);
   };
 
-  const confirmCreditSale = () => {
+  const confirmCreditSale = async () => {
     const order = creditStep;
     let customerId = creditCustomerId;
     let customerName = "";
-    let updatedCustomers = customers;
 
     if (creditMode === "existing") {
       const cust = customers.find((c) => c.id === creditCustomerId);
@@ -1522,19 +1631,19 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     } else {
       if (!creditNewName.trim()) { alert("Enter the customer's name."); return; }
       const newCust = { id: uid(), name: creditNewName.trim(), phone: creditNewPhone.trim(), notes: "", visits: 0, points: 0, referralCode: creditNewName.replace(/\s/g, "").slice(0, 6).toUpperCase() + Math.floor(Math.random() * 90 + 10) };
-      updatedCustomers = [...customers, newCust];
-      setCustomers(updatedCustomers);
+      // insert just this one row (awaited) so the server function can find it
+      const { error } = await supabase.from("customers").insert(TABLE_MAP.customers.toDb(newCust));
+      if (error) { alert("Couldn't create the customer: " + error.message); return; }
       customerId = newCust.id;
       customerName = newCust.name;
     }
 
-    finalizeSettlement(order, "credit", customerName);
-    setCreditTransactions([...creditTransactions, {
-      id: uid(), customerId, customerName, type: "sale", orderId: order.id,
-      amount: order.total, date: today(), createdBy: currentUser?.name || "Unknown",
-    }]);
-    logAudit(currentUser?.name, "CREDIT_SALE", { orderId: order.id, customerName, amount: order.total });
-    setCreditStep(null);
+    // the server writes the credit-book entry as part of the same transaction
+    const ok = await finalizeSettlement(order, "credit", customerName, customerId);
+    if (ok) {
+      logAudit(currentUser?.name, "CREDIT_SALE", { orderId: order.id, customerName, amount: order.total });
+      setCreditStep(null);
+    }
   };
 
   const cancelOrder = (order) => {
@@ -1552,23 +1661,19 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     cancelOrder(order); // not-yet-paid orders cancel instantly, same as before — any role can do this
   };
 
-  const confirmVoid = () => {
+  const confirmVoid = async () => {
     if (!voidReason.trim()) return;
     const order = voidTarget;
-    setOrders((currentOrders) => currentOrders.map((o) => (o.id === order.id ? { ...o, status: "cancelled", cancelReason: voidReason.trim(), cancelledFromPaid: true, voidedBy: currentUser?.name || "Unknown" } : o)));
-    // reverse any loyalty points/visit that were credited when it was paid
-    const cust = customers.find((c) => c.name === order.customerName);
-    if (cust) {
-      setCustomers(customers.map((c) => c.id === cust.id
-        ? { ...c, points: Math.max(0, c.points - Math.floor(order.total / 100)), visits: Math.max(0, c.visits - 1) }
-        : c));
+    try {
+      // server restores stock from the ledger, reverses loyalty and the credit-book entry, atomically
+      const { error } = await supabase.rpc("void_order", { p_order_id: order.id, p_reason: voidReason.trim(), p_actor_id: currentUser?.id });
+      if (error) throw error;
+      logAudit(currentUser?.name, "BILL_VOIDED", { orderId: order.id, table: order.tableName, total: order.total, reason: voidReason.trim() });
+      await refreshData(order.id);
+      setVoidTarget(null);
+    } catch (e) {
+      alert("Void was NOT recorded: " + (e.message || e) + "\n\nNothing was changed.");
     }
-    // if this bill was on credit, remove the credit sale record too — the customer no longer owes it
-    if (order.paymentMethod === "credit") {
-      setCreditTransactions(creditTransactions.filter((c) => !(c.orderId === order.id && c.type === "sale")));
-    }
-    logAudit(currentUser?.name, "BILL_VOIDED", { orderId: order.id, table: order.tableName, total: order.total, reason: voidReason.trim() });
-    setVoidTarget(null);
   };
 
   const visible = orders
@@ -2005,7 +2110,7 @@ function Inventory({ inventory, setInventory, waste, setWaste, businessDay }) {
 
   const addItem = () => {
     if (!form.name) return;
-    setInventory([...inventory, { id: uid(), name: form.name, unit: form.unit, stock: Number(form.stock) || 0, reorder: Number(form.reorder) || 0 }]);
+    setInventory([...inventory, { id: uid(), name: form.name, unit: form.unit, stock: Number(form.stock) || 0, reorder: Number(form.reorder) || 0, avgCost: 0 }]);
     setForm({ name: "", unit: "kg", stock: "", reorder: "" }); setModal(false);
   };
   const adjustStock = (id, delta) => setInventory(inventory.map((i) => i.id === id ? { ...i, stock: Math.max(0, i.stock + delta) } : i));
@@ -2022,7 +2127,7 @@ function Inventory({ inventory, setInventory, waste, setWaste, businessDay }) {
 
   const exportToExcel = () => {
     const wb = XLSX.utils.book_new();
-    const stockSheet = inventory.map((i) => ({ Item: i.name, Stock: i.stock, Unit: i.unit, "Reorder Level": i.reorder, Status: i.stock <= i.reorder ? "Reorder now" : "Healthy" }));
+    const stockSheet = inventory.map((i) => ({ Item: i.name, Stock: i.stock, Unit: i.unit, "Average Cost (Rs)": Number(i.avgCost || 0), "Stock Value (Rs)": Number(i.stock || 0) * Number(i.avgCost || 0), "Reorder Level": i.reorder, Status: i.stock <= i.reorder ? "Reorder now" : "Healthy" }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(stockSheet), "Stock");
     const wasteSheet = waste.map((w) => ({ Date: w.date, Item: w.itemName, Quantity: w.qty, Unit: w.unit, Reason: w.reason }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(wasteSheet), "Waste Log");
@@ -2046,7 +2151,7 @@ function Inventory({ inventory, setInventory, waste, setWaste, businessDay }) {
         <Card style={{ padding: 0, overflow: "hidden" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
             <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}>
-              <th style={{ padding: "10px 14px" }}>Item</th><th>Stock</th><th>Reorder Level</th><th>Status</th><th></th>
+              <th style={{ padding: "10px 14px" }}>Item</th><th>Stock</th><th>Avg Cost</th><th>Stock Value</th><th>Reorder Level</th><th>Status</th><th></th>
             </tr></thead>
             <tbody>
               {inventory.map((i) => (
@@ -2059,6 +2164,8 @@ function Inventory({ inventory, setInventory, waste, setWaste, businessDay }) {
                       <button onClick={() => adjustStock(i.id, 1)} style={{ border: "none", background: T.dusk, color: "#fff", borderRadius: 5, width: 22, height: 22, cursor: "pointer" }}>+</button>
                     </div>
                   </td>
+                  <td>{money(i.avgCost || 0)} / {i.unit}</td>
+                  <td>{money(Number(i.stock || 0) * Number(i.avgCost || 0))}</td>
                   <td>{i.reorder} {i.unit}</td>
                   <td>{i.stock <= i.reorder ? <Pill tone="bad">Reorder now</Pill> : <Pill tone="good">Healthy</Pill>}</td>
                   <td><button onClick={() => removeItem(i.id)} style={{ background: "none", border: "none", cursor: "pointer", color: T.plum, opacity: 0.5 }}><Trash2 size={13} /></button></td>
@@ -2122,7 +2229,7 @@ function Inventory({ inventory, setInventory, waste, setWaste, businessDay }) {
 }
 
 /* ================= ACCOUNTING ================= */
-function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, setCashDeposits, businessDay, creditTransactions, currentUser }) {
+function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, setCashDeposits, businessDay, creditTransactions, currentUser, inventoryMovements }) {
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState({ category: "Ingredients", description: "", amount: "", paymentMethod: "cash" });
   const [depositModal, setDepositModal] = useState(false);
@@ -2136,7 +2243,14 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
   const revenue = orders.filter((o) => o.status === "paid").reduce((s, o) => s + Number(o.total || 0), 0);
   const totalExpense = expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
   const totalPurchaseSpend = purchases.reduce((s, p) => s + Number(p.totalCost || 0), 0);
-  const profit = revenue - totalExpense - totalPurchaseSpend;
+  const consumedItemIdsAll = new Set((inventoryMovements || []).filter((m) => m.type === "sale_cogs" || m.type === "void_reversal").map((m) => m.itemId));
+  const recipeCogsAll = Math.max(0, -(inventoryMovements || []).filter((m) => m.type === "sale_cogs" || m.type === "void_reversal").reduce((s, m) => s + Number(m.totalCost || 0), 0));
+  // Recipe-tracked ingredients use actual consumed cost. Historical/untracked
+  // stock purchases continue to contribute their legacy COGS amount.
+  const legacyCogsForUntrackedAll = purchases.filter((p) => (p.costType || (p.itemId ? "cogs" : "operating")) === "cogs" && !consumedItemIdsAll.has(p.itemId)).reduce((s, p) => s + Number(p.totalCost || 0), 0);
+  const actualCogsAll = recipeCogsAll + legacyCogsForUntrackedAll;
+  const operatingPurchasesAll = purchases.filter((p) => (p.costType || (p.itemId ? "cogs" : "operating")) !== "cogs").reduce((s, p) => s + Number(p.totalCost || 0), 0);
+  const netProfit = revenue - actualCogsAll - totalExpense - operatingPurchasesAll;
   const totalDeposited = cashDeposits.reduce((s, d) => s + Number(d.amount || 0), 0);
 
   const addExpense = () => {
@@ -2177,11 +2291,18 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
     const scopedOrders = scoped(paidOrders, "createdAt");
     const scopedExpenses = scoped(expenses);
     const scopedPurchases = scoped(purchases);
+    const scopedMovements = (inventoryMovements || []).filter((m) => scope === "today" ? (m.date || m.createdAt || "").slice(0, 10) === today() : true);
     const scopedDeposits = scoped(cashDeposits);
     const scopedRepayments = scoped(creditRepayments);
     const rev = scopedOrders.reduce((s, o) => s + Number(o.total || 0), 0);
     const exp = scopedExpenses.reduce((s, e) => s + Number(e.amount || 0), 0);
     const pur = scopedPurchases.reduce((s, p) => s + Number(p.totalCost || 0), 0);
+    const consumedItemIdsScoped = new Set(scopedMovements.filter((m) => m.type === "sale_cogs" || m.type === "void_reversal").map((m) => m.itemId));
+    const recipeCogs = Math.max(0, -scopedMovements.filter((m) => m.type === "sale_cogs" || m.type === "void_reversal").reduce((s, m) => s + Number(m.totalCost || 0), 0));
+    const legacyCogsForUntracked = scopedPurchases.filter((p) => (p.costType || (p.itemId ? "cogs" : "operating")) === "cogs" && !consumedItemIdsScoped.has(p.itemId)).reduce((s, p) => s + Number(p.totalCost || 0), 0);
+    const actualCogs = recipeCogs + legacyCogsForUntracked;
+    const operatingPurchaseTotal = scopedPurchases.filter((p) => (p.costType || (p.itemId ? "cogs" : "operating")) !== "cogs").reduce((s, p) => s + Number(p.totalCost || 0), 0);
+    const netAccounting = rev - exp - actualCogs - operatingPurchaseTotal;
     const dep = scopedDeposits.reduce((s, d) => s + Number(d.amount || 0), 0);
     const cashIn = scopedOrders.filter((o) => o.paymentMethod === "cash").reduce((s, o) => s + Number(o.total || 0), 0) + scopedRepayments.filter((c) => c.paymentMethod === "cash").reduce((s, c) => s + Number(c.amount || 0), 0);
     const cashOut = scopedExpenses.filter((e) => e.paymentMethod === "cash").reduce((s, e) => s + Number(e.amount || 0), 0) + scopedPurchases.filter((p) => p.paymentMethod === "cash").reduce((s, p) => s + Number(p.totalCost || 0), 0);
@@ -2192,7 +2313,7 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
       { Metric: scope === "today" ? "Revenue Today (Rs)" : "Total Revenue (Rs)", Value: rev },
       { Metric: scope === "today" ? "Expenses Today (Rs)" : "Total Expenses (Rs)", Value: exp },
       { Metric: scope === "today" ? "Purchases Today (Rs)" : "Total Purchases (Rs)", Value: pur },
-      { Metric: scope === "today" ? "Net Today (Rs)" : "Net Profit (Rs)", Value: rev - exp - pur },
+      { Metric: scope === "today" ? "Net Today (Rs)" : "Net Profit (Rs)", Value: netAccounting },
       { Metric: "Cash Deposited to Bank (Rs)", Value: dep },
       { Metric: "Cash Movement — In (Rs)", Value: cashIn }, { Metric: "Cash Movement — Out (Rs)", Value: cashOut },
       { Metric: "Bank Movement — In (Rs)", Value: bankIn }, { Metric: "Bank Movement — Out (Rs)", Value: bankOut },
@@ -2212,15 +2333,23 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
     const dayExpenses = expenses.filter((e) => inRange(e.date, pnlFrom, pnlTo));
     const dayPurchases = purchases.filter((p) => inRange(p.date, pnlFrom, pnlTo));
     const income = sales.reduce((s, o) => s + Number(o.total || 0), 0);
-    const cogs = dayPurchases.reduce((s, p) => s + Number(p.totalCost || 0), 0);
-    const operating = dayExpenses.reduce((s, e) => s + Number(e.amount || 0), 0);
-    return { sales, dayExpenses, dayPurchases, income, cogs, gross: income - cogs, operating, net: income - cogs - operating };
+    const cogsMovements = (inventoryMovements || []).filter((m) => inRange(m.date || m.createdAt, pnlFrom, pnlTo) && (m.type === "sale_cogs" || m.type === "void_reversal"));
+    const hasRecipeCogs = cogsMovements.length > 0;
+    const recipeCogs = Math.max(0, -cogsMovements.reduce((s, m) => s + Number(m.totalCost || 0), 0));
+    const consumedItemIdsRange = new Set(cogsMovements.map((m) => m.itemId));
+    // Recipe-tracked ingredients use actual consumption; untracked stock items
+    // retain the legacy purchase-based COGS treatment for this date range.
+    const cogsPurchases = dayPurchases.filter((p) => (p.costType || (p.itemId ? "cogs" : "operating")) === "cogs" && !consumedItemIdsRange.has(p.itemId));
+    const operatingPurchases = dayPurchases.filter((p) => (p.costType || (p.itemId ? "cogs" : "operating")) !== "cogs");
+    const cogs = recipeCogs + cogsPurchases.reduce((s, p) => s + Number(p.totalCost || 0), 0);
+    const operating = dayExpenses.reduce((s, e) => s + Number(e.amount || 0), 0) + operatingPurchases.reduce((s, p) => s + Number(p.totalCost || 0), 0);
+    return { sales, dayExpenses, dayPurchases, cogsPurchases, operatingPurchases, cogsMovements, hasRecipeCogs, income, cogs, gross: income - cogs, operating, net: income - cogs - operating };
   };
   const printPnl = () => {
     const r = makePnl();
     const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
     const rows = (arr, name, amount) => arr.length ? arr.map((x) => `<tr><td>${esc(name(x))}</td><td class="num">${money(amount(x))}</td></tr>`).join("") : `<tr><td colspan="2" class="empty">None</td></tr>`;
-    const html = `<!doctype html><html><head><title>Parijat Cafe P&L</title><style>body{font-family:Arial,sans-serif;color:#14213D;max-width:760px;margin:0 auto;padding:30px;font-size:13px}h1{margin:0 0 4px}h2{font-size:15px;border-bottom:2px solid #14213D;padding-bottom:5px;margin-top:24px}table{width:100%;border-collapse:collapse}td{padding:7px 4px;border-bottom:1px solid #e5e7eb}.num{text-align:right}.total{font-weight:700;border-top:2px solid #14213D}.profit{font-size:18px;font-weight:700;padding:14px;background:#f6f8fb;margin-top:20px}.empty{color:#9ca3af;font-style:italic}@media print{body{padding:0}}</style></head><body><h1>Parijat Cafe — Profit & Loss Statement</h1><div>From ${esc(pnlFrom)} to ${esc(pnlTo)}</div><h2>INCOME</h2><table><tr><td>Food & Beverage Sales</td><td class="num">${money(r.income)}</td></tr><tr class="total"><td>Total Income</td><td class="num">${money(r.income)}</td></tr></table><h2>COST OF GOODS SOLD</h2><table>${rows(r.dayPurchases,(p)=>p.description||p.supplier||"Purchase",(p)=>p.totalCost)}<tr class="total"><td>Total COGS / Purchases</td><td class="num">${money(r.cogs)}</td></tr></table><h2>GROSS PROFIT</h2><table><tr class="total"><td>Sales − COGS</td><td class="num">${money(r.gross)}</td></tr></table><h2>OPERATING EXPENSES</h2><table>${rows(r.dayExpenses,(e)=>`${e.category}${e.description?" — "+e.description:""}`,(e)=>e.amount)}<tr class="total"><td>Total Operating Expenses</td><td class="num">${money(r.operating)}</td></tr></table><div class="profit">NET ${r.net >= 0 ? "PROFIT" : "LOSS"}: ${money(Math.abs(r.net))}</div><p style="color:#6b7280;font-size:11px;margin-top:24px">Generated ${new Date().toLocaleString()}</p><script>window.onload=()=>window.print()</script></body></html>`;
+    const html = `<!doctype html><html><head><title>Parijat Cafe P&L</title><style>body{font-family:Arial,sans-serif;color:#14213D;max-width:760px;margin:0 auto;padding:30px;font-size:13px}h1{margin:0 0 4px}h2{font-size:15px;border-bottom:2px solid #14213D;padding-bottom:5px;margin-top:24px}table{width:100%;border-collapse:collapse}td{padding:7px 4px;border-bottom:1px solid #e5e7eb}.num{text-align:right}.total{font-weight:700;border-top:2px solid #14213D}.profit{font-size:18px;font-weight:700;padding:14px;background:#f6f8fb;margin-top:20px}.empty{color:#9ca3af;font-style:italic}@media print{body{padding:0}}</style></head><body><h1>Parijat Cafe — Profit & Loss Statement</h1><div>From ${esc(pnlFrom)} to ${esc(pnlTo)}</div><h2>INCOME</h2><table><tr><td>Food & Beverage Sales</td><td class="num">${money(r.income)}</td></tr><tr class="total"><td>Total Income</td><td class="num">${money(r.income)}</td></tr></table><h2>COST OF GOODS SOLD</h2><table>${(r.hasRecipeCogs ? rows(r.cogsMovements.filter((m)=>m.type === "sale_cogs"),(m)=>`${m.menuItemName || "Menu item"} — ${m.itemName}`,(m)=>Math.abs(Number(m.totalCost || 0))) : "") + (r.cogsPurchases.length ? rows(r.cogsPurchases,(p)=>`${p.category || "Stock"} — ${p.itemName || p.description || p.supplier || "Purchase"}`,(p)=>p.totalCost) : "") || `<tr><td colspan="2" class="empty">None</td></tr>`}<tr class="total"><td>Total Cost of Goods</td><td class="num">${money(r.cogs)}</td></tr></table><h2>GROSS PROFIT</h2><table><tr class="total"><td>Sales − COGS</td><td class="num">${money(r.gross)}</td></tr></table><h2>OPERATING EXPENSES</h2><table>${rows(r.dayExpenses,(e)=>`${e.category}${e.description?" — "+e.description:""}`,(e)=>e.amount)}${rows(r.operatingPurchases,(p)=>`${p.category || "Other"} — ${p.itemName || "Purchase"}`,(p)=>p.totalCost)}<tr class="total"><td>Total Operating Expenses</td><td class="num">${money(r.operating)}</td></tr></table><div class="profit">NET ${r.net >= 0 ? "PROFIT" : "LOSS"}: ${money(Math.abs(r.net))}</div><p style="color:#6b7280;font-size:11px;margin-top:24px">Generated ${new Date().toLocaleString()}</p><script>window.onload=()=>window.print()</script></body></html>`;
     const w = window.open("", "_blank", "width=850,height=900"); if (!w) return alert("Please allow pop-ups to print the P&L report."); w.document.write(html); w.document.close();
   };
 
@@ -2243,7 +2372,7 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
         <Card style={cardStyle} onClick={() => openDetail("revenue")}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Revenue</div><div style={{ fontSize: 22, fontWeight: 700, color: "#15803D" }}>{money(revenue)}</div><div style={{ fontSize: 11, color: T.gold, marginTop: 5 }}>Click to view sales →</div></Card>
         <Card style={cardStyle} onClick={() => openDetail("expenses")}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Expenses</div><div style={{ fontSize: 22, fontWeight: 700, color: T.red }}>{money(totalExpense)}</div><div style={{ fontSize: 11, color: T.gold, marginTop: 5 }}>Click to view expenses →</div></Card>
         <Card style={cardStyle} onClick={() => openDetail("purchases")}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Total Purchases</div><div style={{ fontSize: 22, fontWeight: 700, color: T.red }}>{money(totalPurchaseSpend)}</div><div style={{ fontSize: 11, color: T.gold, marginTop: 5 }}>Click to view purchases →</div></Card>
-        <Card style={cardStyle} onClick={() => setPnlModal(true)}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Net Profit</div><div style={{ fontSize: 22, fontWeight: 700, color: T.dusk }}>{money(profit)}</div><div style={{ fontSize: 11, color: T.gold, marginTop: 5 }}>Click for P&amp;L →</div></Card>
+        <Card style={cardStyle} onClick={() => setPnlModal(true)}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Net Profit</div><div style={{ fontSize: 22, fontWeight: 700, color: netProfit >= 0 ? T.sage : T.red }}>{money(Math.abs(netProfit))}</div><div style={{ fontSize: 11, color: T.gold, marginTop: 5 }}>Click for P&amp;L →</div></Card>
         <Card style={cardStyle} onClick={() => openDetail("credit")}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Credit Outstanding</div><div style={{ fontSize: 22, fontWeight: 700, color: creditOutstanding > 0 ? T.red : T.dusk }}>{money(creditOutstanding)}</div><div style={{ fontSize: 11, color: T.gold, marginTop: 5 }}>Click to view credit →</div></Card>
       </div>
 
@@ -2265,25 +2394,35 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
 
       {detail && <Modal title={detail === "revenue" ? "Revenue Details" : detail === "expenses" ? "Expense Details" : detail === "purchases" ? "Purchase Details" : "Credit Details"} onClose={() => setDetail(null)} width={760}><div style={{ maxHeight: "60vh", overflow: "auto" }}>{detailRows.length === 0 ? <Empty text="No records found." /> : <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}><thead><tr style={{ background: T.cream, textAlign: "left" }}><th style={{ padding: 9 }}>Date</th><th>Description</th><th>Type / Method</th><th style={{ textAlign: "right" }}>Amount</th></tr></thead><tbody>{detailRows.slice().reverse().map((r) => <tr key={r.id} style={{ borderTop: `1px solid ${T.line}` }}><td style={{ padding: 9 }}>{r.date || "—"}</td><td>{r.description}</td><td>{r.meta}</td><td style={{ textAlign: "right", fontWeight: 600, color: r.amount < 0 ? T.red : T.dusk }}>{money(r.amount)}</td></tr>)}</tbody></table>}</div></Modal>}
 
-      {pnlModal && <Modal title="Profit & Loss Report" onClose={() => setPnlModal(false)} width={760}><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}><Field label="From Date"><input type="date" style={inputStyle} value={pnlFrom} onChange={(e) => setPnlFrom(e.target.value)} /></Field><Field label="To Date"><input type="date" style={inputStyle} value={pnlTo} onChange={(e) => setPnlTo(e.target.value)} /></Field></div>{(() => { const r = makePnl(); return <><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}><Card style={{ padding: 14 }}><div style={{ color: T.plum, fontSize: 11 }}>INCOME</div><div style={{ fontSize: 21, fontWeight: 700, color: "#15803D" }}>{money(r.income)}</div><div style={{ fontSize: 12, marginTop: 4 }}>Food &amp; Beverage Sales</div></Card><Card style={{ padding: 14 }}><div style={{ color: T.plum, fontSize: 11 }}>COGS / PURCHASES</div><div style={{ fontSize: 21, fontWeight: 700, color: T.red }}>{money(r.cogs)}</div><div style={{ fontSize: 12, marginTop: 4 }}>Direct purchase cost</div></Card></div><div style={{ marginTop: 14, padding: 14, background: T.cream, borderRadius: 10 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span>Gross Profit</span><strong>{money(r.gross)}</strong></div><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span>Operating Expenses</span><strong style={{ color: T.red }}>{money(r.operating)}</strong></div><div style={{ borderTop: `2px solid ${T.dusk}`, paddingTop: 10, display: "flex", justifyContent: "space-between", fontSize: 17 }}><strong>NET {r.net >= 0 ? "PROFIT" : "LOSS"}</strong><strong style={{ color: r.net >= 0 ? "#15803D" : T.red }}>{money(Math.abs(r.net))}</strong></div></div><div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}><Btn variant="ghost" onClick={printPnl}><Printer size={15} /> Print / Save PDF</Btn><Btn variant="primary" onClick={() => setPnlModal(false)}>Close</Btn></div></> })()}</Modal>}
+      {pnlModal && <Modal title="Profit & Loss Report" onClose={() => setPnlModal(false)} width={760}><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}><Field label="From Date"><input type="date" style={inputStyle} value={pnlFrom} onChange={(e) => setPnlFrom(e.target.value)} /></Field><Field label="To Date"><input type="date" style={inputStyle} value={pnlTo} onChange={(e) => setPnlTo(e.target.value)} /></Field></div>{(() => { const r = makePnl(); return <><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}><Card style={{ padding: 14 }}><div style={{ color: T.plum, fontSize: 11 }}>INCOME</div><div style={{ fontSize: 21, fontWeight: 700, color: "#15803D" }}>{money(r.income)}</div><div style={{ fontSize: 12, marginTop: 4 }}>Food &amp; Beverage Sales</div></Card><Card style={{ padding: 14 }}><div style={{ color: T.plum, fontSize: 11 }}>COGS / PURCHASES</div><div style={{ fontSize: 21, fontWeight: 700, color: T.red }}>{money(r.cogs)}</div><div style={{ fontSize: 12, marginTop: 4 }}>{r.hasRecipeCogs ? "Ingredients actually consumed from paid orders" : "Legacy direct stock purchase cost — add recipes for actual COGS"}</div></Card></div><div style={{ marginTop: 14, padding: 14, background: T.cream, borderRadius: 10 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span>Gross Profit</span><strong>{money(r.gross)}</strong></div><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span>Operating Expenses</span><strong style={{ color: T.red }}>{money(r.operating)}</strong></div><div style={{ borderTop: `2px solid ${T.dusk}`, paddingTop: 10, display: "flex", justifyContent: "space-between", fontSize: 17 }}><strong>NET {r.net >= 0 ? "PROFIT" : "LOSS"}</strong><strong style={{ color: r.net >= 0 ? "#15803D" : T.red }}>{money(Math.abs(r.net))}</strong></div></div><div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}><Btn variant="ghost" onClick={printPnl}><Printer size={15} /> Print / Save PDF</Btn><Btn variant="primary" onClick={() => setPnlModal(false)}>Close</Btn></div></> })()}</Modal>}
     </div>
   );
 }
 
 /* ================= MENU MANAGEMENT ================= */
-function MenuManagement({ menu, setMenu }) {
+function MenuManagement({ menu, setMenu, inventory }) {
   const [modal, setModal] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ name: "", category: "Coffee & Brews", price: "", veg: true, station: "kitchen" });
+  const [form, setForm] = useState({ name: "", category: "Coffee & Brews", price: "", veg: true, station: "kitchen", recipe: [] });
 
-  const openNew = () => { setEditing(null); setForm({ name: "", category: "Coffee & Brews", price: "", veg: true, station: "kitchen" }); setModal(true); };
-  const openEdit = (m) => { setEditing(m.id); setForm({ ...m, station: m.station || "kitchen" }); setModal(true); };
+  const openNew = () => { setEditing(null); setForm({ name: "", category: "Coffee & Brews", price: "", veg: true, station: "kitchen", recipe: [] }); setModal(true); };
+  const openEdit = (m) => { setEditing(m.id); setForm({ ...m, station: m.station || "kitchen", recipe: Array.isArray(m.recipe) ? m.recipe.map((r) => ({ ...r })) : [] }); setModal(true); };
   const save = () => {
     if (!form.name || !form.price) return;
-    if (editing) setMenu(menu.map((m) => m.id === editing ? { ...m, ...form, price: Number(form.price) } : m));
-    else setMenu([...menu, { id: uid(), ...form, price: Number(form.price), available: true }]);
+    const cleanRecipe = (form.recipe || []).filter((r) => r.inventoryItemId && Number(r.quantity) > 0).map((r) => ({ ...r, quantity: Number(r.quantity) }));
+    const cleanForm = { ...form, price: Number(form.price), recipe: cleanRecipe };
+    if (editing) setMenu(menu.map((m) => m.id === editing ? { ...m, ...cleanForm } : m));
+    else setMenu([...menu, { id: uid(), ...cleanForm, available: true }]);
     setModal(false);
   };
+  const addRecipeLine = () => {
+    const first = inventory[0];
+    if (!first) return;
+    setForm((f) => ({ ...f, recipe: [...(f.recipe || []), { inventoryItemId: first.id, name: first.name, unit: first.unit, quantity: "" }] }));
+  };
+  const updateRecipeLine = (index, patch) => setForm((f) => ({ ...f, recipe: (f.recipe || []).map((r, i) => i === index ? { ...r, ...patch } : r) }));
+  const removeRecipeLine = (index) => setForm((f) => ({ ...f, recipe: (f.recipe || []).filter((_, i) => i !== index) }));
+
   const toggleAvailable = (id) => setMenu(menu.map((m) => m.id === id ? { ...m, available: !m.available } : m));
   const remove = (id) => setMenu(menu.filter((m) => m.id !== id));
 
@@ -2318,6 +2457,9 @@ function MenuManagement({ menu, setMenu }) {
                     <Pill tone={m.station === "bar" ? "gold" : "neutral"}>{m.station === "bar" ? "Bar" : "Kitchen"}</Pill>
                   </div>
                 </div>
+                <div style={{ marginTop: 10, padding: 9, background: T.cream, borderRadius: 8, fontSize: 11.5, color: T.plum }}>
+                  <strong>Recipe:</strong> {m.recipe?.length ? m.recipe.map((r) => `${r.quantity} ${r.unit} ${r.name}`).join(" · ") : "Not set — inventory/COGS will not auto-consume for this item."}
+                </div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
                   <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
                     <input type="checkbox" checked={m.available} onChange={() => toggleAvailable(m.id)} /> Available
@@ -2348,6 +2490,23 @@ function MenuManagement({ menu, setMenu }) {
               <option value="bar">Bar & Beverage</option>
             </select>
           </Field>
+          <div style={{ marginTop: 6, marginBottom: 14, padding: 12, border: `1px solid ${T.line}`, borderRadius: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 9 }}>
+              <div><strong style={{ fontSize: 13 }}>Recipe / Ingredients</strong><div style={{ fontSize: 11, color: T.plum, marginTop: 2 }}>Amount used for ONE menu item. Inventory is reduced when the order is paid.</div></div>
+              <Btn variant="ghost" onClick={addRecipeLine} disabled={!inventory.length}><Plus size={14} /> Add ingredient</Btn>
+            </div>
+            {(form.recipe || []).map((r, index) => {
+              const inv = inventory.find((i) => i.id === r.inventoryItemId);
+              return <div key={index} style={{ display: "grid", gridTemplateColumns: "1.6fr .7fr auto", gap: 7, marginBottom: 7, alignItems: "center" }}>
+                <select style={inputStyle} value={r.inventoryItemId} onChange={(e) => { const i = inventory.find((x) => x.id === e.target.value); updateRecipeLine(index, { inventoryItemId: i.id, name: i.name, unit: i.unit }); }}>
+                  {inventory.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
+                </select>
+                <div style={{ display: "flex", alignItems: "center", gap: 5 }}><input type="number" min="0" step="any" style={inputStyle} value={r.quantity} onChange={(e) => updateRecipeLine(index, { quantity: e.target.value })} placeholder="Qty" /><span style={{ fontSize: 11, color: T.plum }}>{inv?.unit || r.unit}</span></div>
+                <button onClick={() => removeRecipeLine(index)} style={{ border: "none", background: "none", color: T.red, cursor: "pointer" }}><Trash2 size={14} /></button>
+              </div>;
+            })}
+            {!form.recipe?.length && <div style={{ fontSize: 12, color: T.plum, opacity: .7 }}>No recipe added yet.</div>}
+          </div>
           <Btn variant="primary" onClick={save} style={{ width: "100%", justifyContent: "center" }}>{editing ? "Save Changes" : "Add Item"}</Btn>
         </Modal>
       )}
@@ -3120,59 +3279,75 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
 /* ================= PURCHASE MANAGEMENT ================= */
 function PurchaseManagement({ purchases, setPurchases, inventory, setInventory, businessDay }) {
   const [modal, setModal] = useState(false);
-  const [form, setForm] = useState({ itemId: "", itemName: "", quantity: "", unit: "kg", unitCost: "", supplier: "", notes: "", paymentMethod: "cash" });
-  const [mode, setMode] = useState("existing"); // "existing" inventory item, or "new" one-off item
+  const [form, setForm] = useState({ itemId: "", itemName: "", category: "Food Ingredients", quantity: "", unit: "kg", unitCost: "", supplier: "", notes: "", paymentMethod: "cash", costType: "cogs", trackInventory: true });
+  const [mode, setMode] = useState("existing");
 
-  const openNew = () => {
-    setForm({ itemId: "", itemName: "", quantity: "", unit: "kg", unitCost: "", supplier: "", notes: "", paymentMethod: "cash" });
-    setMode("existing");
-    setModal(true);
-  };
+  const resetForm = () => setForm({ itemId: "", itemName: "", category: "Food Ingredients", quantity: "", unit: "kg", unitCost: "", supplier: "", notes: "", paymentMethod: "cash", costType: "cogs", trackInventory: true });
+  const openNew = () => { resetForm(); setMode("existing"); setModal(true); };
 
   const onPickItem = (id) => {
     const item = inventory.find((i) => i.id === id);
-    setForm({ ...form, itemId: id, itemName: item ? item.name : "", unit: item ? item.unit : form.unit });
+    setForm((f) => ({ ...f, itemId: id, itemName: item ? item.name : "", unit: item ? item.unit : f.unit, costType: "cogs", trackInventory: true }));
   };
 
   const totalCost = (Number(form.quantity) || 0) * (Number(form.unitCost) || 0);
 
   const save = () => {
     if (businessDay.status !== "open") { alert("Business Day is closed. Open it before logging a purchase."); return; }
-    if (!form.itemName || !form.quantity || !form.unitCost) return;
+    if (!form.category || !form.itemName || Number(form.quantity) <= 0 || Number(form.unitCost) < 0) { alert("Please enter category, item, quantity and unit cost."); return; }
+    if (mode === "existing" && !form.itemId) { alert("Please select the inventory item you are restocking."); return; }
+    const trackInventory = mode === "existing" ? true : !!form.trackInventory;
     const entry = {
       id: uid(),
-      itemId: mode === "existing" ? form.itemId || null : null,
-      itemName: form.itemName,
+      itemId: trackInventory && mode === "existing" ? (form.itemId || null) : null,
+      itemName: form.itemName.trim(),
+      category: form.category,
       quantity: Number(form.quantity),
       unit: form.unit,
       unitCost: Number(form.unitCost),
       totalCost,
-      supplier: form.supplier,
-      notes: form.notes,
+      supplier: form.supplier.trim(),
+      notes: form.notes.trim(),
       date: today(),
       paymentMethod: form.paymentMethod,
+      costType: trackInventory ? "cogs" : (form.costType || "operating"),
     };
-    setPurchases([...purchases, entry]);
+    setPurchases((prev) => [...prev, entry]);
 
-    // if this purchase matches an existing inventory item, bump its stock automatically
-    if (entry.itemId) {
-      setInventory(inventory.map((i) => (i.id === entry.itemId ? { ...i, stock: i.stock + entry.quantity } : i)));
+    // Existing stock is always increased. A new item can optionally be added to inventory.
+    if (trackInventory) {
+      if (entry.itemId) {
+        setInventory((prev) => prev.map((i) => {
+          if (i.id !== entry.itemId) return i;
+          const oldStock = Number(i.stock || 0);
+          const oldAvg = Number(i.avgCost || 0);
+          const newStock = oldStock + entry.quantity;
+          const effectiveOldAvg = oldAvg > 0 ? oldAvg : entry.unitCost;
+          const newAvg = newStock > 0 ? ((oldStock * effectiveOldAvg) + (entry.quantity * entry.unitCost)) / newStock : entry.unitCost;
+          return { ...i, stock: newStock, avgCost: newAvg };
+        }));
+      } else if (mode === "new") {
+        const newItem = { id: uid(), name: entry.itemName, unit: entry.unit, stock: entry.quantity, reorder: 0, avgCost: entry.unitCost };
+        entry.itemId = newItem.id;
+        // Persist the purchase with its new inventory item relationship.
+        setPurchases((prev) => prev.map((p) => p.id === entry.id ? { ...p, itemId: newItem.id } : p));
+        setInventory((prev) => [...prev, newItem]);
+      }
     }
     setModal(false);
   };
 
-  const remove = (id) => setPurchases(purchases.filter((p) => p.id !== id));
-
-  const totalSpend = purchases.reduce((s, p) => s + p.totalCost, 0);
-  const thisMonthSpend = purchases.filter((p) => p.date.slice(0, 7) === today().slice(0, 7)).reduce((s, p) => s + p.totalCost, 0);
+  const remove = (id) => setPurchases((prev) => prev.filter((p) => p.id !== id));
+  const totalSpend = purchases.reduce((s, p) => s + Number(p.totalCost || 0), 0);
+  const thisMonthSpend = purchases.filter((p) => p.date.slice(0, 7) === today().slice(0, 7)).reduce((s, p) => s + Number(p.totalCost || 0), 0);
 
   const exportToExcel = (scope) => {
     const scoped = scope === "today" ? purchases.filter((p) => p.date === today()) : purchases;
     const wb = XLSX.utils.book_new();
     const sheet = scoped.map((p) => ({
-      Date: p.date, Item: p.itemName, Quantity: p.quantity, Unit: p.unit,
-      "Unit Cost (Rs)": p.unitCost, "Total Cost (Rs)": p.totalCost, Supplier: p.supplier,
-      "Paid Via": PAYMENT_METHODS.find((pm) => pm.id === p.paymentMethod)?.label || "Cash", Notes: p.notes,
+      Date: p.date, Category: p.category || "Other", Item: p.itemName, Quantity: p.quantity, Unit: p.unit,
+      "Per Unit (Rs)": p.unitCost, "Total Cost (Rs)": p.totalCost, "Accounting": p.costType === "cogs" ? "Stock / COGS" : "Operating / Other",
+      Supplier: p.supplier, "Paid Via": PAYMENT_METHODS.find((pm) => pm.id === p.paymentMethod)?.label || "Cash", Notes: p.notes,
     }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Purchases");
     XLSX.writeFile(wb, `parijat-cafe-purchases-${scope === "today" ? today() : "all"}.xlsx`);
@@ -3188,75 +3363,54 @@ function PurchaseManagement({ purchases, setPurchases, inventory, setInventory, 
 
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
         <Btn variant="primary" onClick={openNew}><Plus size={15} /> Log Purchase</Btn>
-        <div style={{ display: "flex", gap: 8 }}>
-          <Btn variant="ghost" onClick={() => exportToExcel("today")}><Download size={15} /> Export Today</Btn>
-          <Btn variant="ghost" onClick={() => exportToExcel("all")}><Download size={15} /> Export All</Btn>
-        </div>
+        <div style={{ display: "flex", gap: 8 }}><Btn variant="ghost" onClick={() => exportToExcel("today")}><Download size={15} /> Export Today</Btn><Btn variant="ghost" onClick={() => exportToExcel("all")}><Download size={15} /> Export All</Btn></div>
       </div>
 
       <Card style={{ padding: 0, overflow: "hidden" }}>
-        {purchases.length === 0 ? <Empty text="No purchases logged yet. Log a restock to track supplier spend." /> : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
-            <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}>
-              <th style={{ padding: "10px 14px" }}>Date</th><th>Item</th><th>Qty</th><th>Unit Cost</th><th>Total</th><th>Paid Via</th><th>Supplier</th><th></th>
-            </tr></thead>
-            <tbody>
-              {purchases.slice().reverse().map((p) => (
-                <tr key={p.id} style={{ borderTop: `1px solid ${T.line}` }}>
-                  <td style={{ padding: "10px 14px", opacity: 0.7 }}>{p.date}</td>
-                  <td style={{ fontWeight: 600 }}>{p.itemName}</td>
-                  <td>{p.quantity} {p.unit}</td>
-                  <td>{money(p.unitCost)}</td>
-                  <td>{money(p.totalCost)}</td>
-                  <td>{PAYMENT_METHODS.find((pm) => pm.id === p.paymentMethod)?.label || "Cash"}</td>
-                  <td>{p.supplier || "—"}</td>
-                  <td><button onClick={() => remove(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: T.plum, opacity: 0.5 }}><Trash2 size={13} /></button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        {purchases.length === 0 ? <Empty text="No purchases logged yet. Log a purchase to track stock and supplier spend." /> : (
+          <div style={{ overflowX: "auto" }}><table style={{ width: "100%", minWidth: 900, borderCollapse: "collapse", fontSize: 13.5 }}>
+            <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}><th style={{ padding: "10px 14px" }}>Date</th><th>Category</th><th>Item</th><th>Unit</th><th>Qty</th><th>Per Unit</th><th>Total</th><th>Type</th><th>Paid Via</th><th>Supplier</th><th></th></tr></thead>
+            <tbody>{purchases.slice().reverse().map((p) => (
+              <tr key={p.id} style={{ borderTop: `1px solid ${T.line}` }}>
+                <td style={{ padding: "10px 14px", opacity: 0.7 }}>{p.date}</td><td>{p.category || "Other"}</td><td style={{ fontWeight: 600 }}>{p.itemName}</td><td>{p.unit}</td><td>{p.quantity}</td><td>{money(p.unitCost)}</td><td>{money(p.totalCost)}</td><td><Pill tone={p.costType === "cogs" ? "good" : "warn"}>{p.costType === "cogs" ? "Stock / COGS" : "Operating"}</Pill></td><td>{PAYMENT_METHODS.find((pm) => pm.id === p.paymentMethod)?.label || "Cash"}</td><td>{p.supplier || "—"}</td><td><button onClick={() => remove(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: T.plum, opacity: 0.5 }}><Trash2 size={13} /></button></td>
+              </tr>
+            ))}</tbody>
+          </table></div>
         )}
       </Card>
 
       {modal && (
         <Modal title="Log a Purchase" onClose={() => setModal(false)}>
           <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-            <Btn variant={mode === "existing" ? "gold" : "ghost"} onClick={() => setMode("existing")} style={{ flex: 1, justifyContent: "center" }}>Restock existing item</Btn>
-            <Btn variant={mode === "new" ? "gold" : "ghost"} onClick={() => { setMode("new"); setForm({ ...form, itemId: "" }); }} style={{ flex: 1, justifyContent: "center" }}>New / one-off item</Btn>
+            <Btn variant={mode === "existing" ? "gold" : "ghost"} onClick={() => { setMode("existing"); setForm((f) => ({ ...f, costType: "cogs", trackInventory: true })); }} style={{ flex: 1, justifyContent: "center" }}>Restock existing item</Btn>
+            <Btn variant={mode === "new" ? "gold" : "ghost"} onClick={() => { setMode("new"); setForm((f) => ({ ...f, itemId: "", costType: "operating", trackInventory: false })); }} style={{ flex: 1, justifyContent: "center" }}>New / one-off item</Btn>
           </div>
 
-          {mode === "existing" ? (
-            <Field label="Inventory Item">
-              <select style={inputStyle} value={form.itemId} onChange={(e) => onPickItem(e.target.value)}>
-                <option value="">Select item</option>
-                {inventory.map((i) => <option key={i.id} value={i.id}>{i.name} (currently {i.stock} {i.unit})</option>)}
-              </select>
-            </Field>
-          ) : (
-            <Field label="Item Name"><input style={inputStyle} value={form.itemName} onChange={(e) => setForm({ ...form, itemName: e.target.value })} placeholder="e.g. Disposable cups" /></Field>
-          )}
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <Field label="Quantity"><input type="number" style={inputStyle} value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} /></Field>
-            <Field label="Unit">
-              <select style={inputStyle} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })}>
-                <option>kg</option><option>g</option><option>L</option><option>ml</option><option>pcs</option>
-              </select>
-            </Field>
-          </div>
-          <Field label="Unit Cost (Rs)"><input type="number" style={inputStyle} value={form.unitCost} onChange={(e) => setForm({ ...form, unitCost: e.target.value })} /></Field>
-          <Field label="Paid Via">
-            <select style={inputStyle} value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}>
-              {PAYMENT_METHODS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+          <Field label="Category">
+            <select style={inputStyle} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
+              {PURCHASE_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           </Field>
+
+          {mode === "existing" ? (
+            <Field label="Inventory Item"><select style={inputStyle} value={form.itemId} onChange={(e) => onPickItem(e.target.value)}><option value="">Select item</option>{inventory.map((i) => <option key={i.id} value={i.id}>{i.name} (currently {i.stock} {i.unit})</option>)}</select></Field>
+          ) : (
+            <Field label="Item Name"><input style={inputStyle} value={form.itemName} onChange={(e) => setForm({ ...form, itemName: e.target.value })} placeholder="e.g. Surya Cigarettes, Disposable Cups" /></Field>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}><Field label="Unit"><select style={inputStyle} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })}><option>kg</option><option>g</option><option>L</option><option>ml</option><option>pcs</option><option>box</option><option>pack</option><option>dozen</option></select></Field><Field label="Quantity"><input type="number" min="0" step="any" style={inputStyle} value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} /></Field></div>
+          <Field label="Per Unit Cost (Rs)"><input type="number" min="0" step="any" style={inputStyle} value={form.unitCost} onChange={(e) => setForm({ ...form, unitCost: e.target.value })} /></Field>
+
+          {mode === "new" && <>
+            <Field label="Stock / Accounting Treatment"><select style={inputStyle} value={form.costType} onChange={(e) => setForm({ ...form, costType: e.target.value, trackInventory: e.target.value === "cogs" })}><option value="operating">Operating / Other Purchase — do not add to inventory</option><option value="cogs">Stock / Cost of Goods — add to inventory</option></select></Field>
+            {form.costType === "cogs" && <div style={{ padding: 10, background: "#F0FDF4", border: `1px solid ${T.sage}33`, borderRadius: 8, fontSize: 12, color: T.plum, marginBottom: 12 }}>This new item will be added to inventory and its purchase cost will be treated as stock/COGS.</div>}
+          </>}
+
+          <Field label="Paid Via"><select style={inputStyle} value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}>{PAYMENT_METHODS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}</select></Field>
           <Field label="Supplier"><input style={inputStyle} value={form.supplier} onChange={(e) => setForm({ ...form, supplier: e.target.value })} placeholder="Optional" /></Field>
           <Field label="Notes"><input style={inputStyle} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Optional" /></Field>
 
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-            <span style={{ fontSize: 13, color: T.plum }}>Total cost</span>
-            <strong style={{ fontFamily: "inherit", fontSize: 16 }}>{money(totalCost)}</strong>
-          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}><span style={{ fontSize: 13, color: T.plum }}>Total cost</span><strong style={{ fontFamily: "inherit", fontSize: 16 }}>{money(totalCost)}</strong></div>
           <Btn variant="primary" onClick={save} style={{ width: "100%", justifyContent: "center" }}>Save Purchase</Btn>
         </Modal>
       )}
