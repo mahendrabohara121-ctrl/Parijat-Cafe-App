@@ -234,6 +234,10 @@ async function fetchTable(key) {
 // Served -> Paid) can race in Supabase: an older full-array upsert may arrive after
 // the newer one and put the order back into the previous status.
 const syncQueues = {};
+// Timestamp of the last local write (start OR finish). Background refreshes (poll / live events)
+// that began before this must be discarded, otherwise a stale read can put an old status back on screen.
+let lastLocalWriteAt = 0;
+const hasPendingSync = () => Object.keys(syncQueues).length > 0;
 
 async function syncTable(key, oldArr, newArr) {
   const run = async () => {
@@ -955,7 +959,10 @@ export default function App() {
     let attempt = 0;
     let cancelled = false;
 
-    const applyChange = (setter, fromDb) => (payload) => {
+    const applyChange = (key, setter, fromDb) => (payload) => {
+      // our own full-array upserts echo back as events for EVERY row, possibly out of order;
+      // while we still have a save in flight for this table, those echoes are stale — skip them.
+      if (syncQueues[key]) return;
       setter((prev) => {
         if (payload.eventType === "DELETE") {
           return prev.filter((row) => row.id !== payload.old.id);
@@ -975,11 +982,11 @@ export default function App() {
 
       channel = supabase
         .channel("parijat-pos-realtime-" + Date.now()) // unique name per attempt avoids stale-topic reuse issues
-        .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, applyChange(setOrders, TABLE_MAP.orders.fromDb))
-        .on("postgres_changes", { event: "*", schema: "public", table: "dining_tables" }, applyChange(setTables, TABLE_MAP.tables.fromDb))
-        .on("postgres_changes", { event: "*", schema: "public", table: "menu_items" }, applyChange(setMenu, TABLE_MAP.menu.fromDb))
-        .on("postgres_changes", { event: "*", schema: "public", table: "inventory_items" }, applyChange(setInventory, TABLE_MAP.inventory.fromDb))
-        .on("postgres_changes", { event: "*", schema: "public", table: "inventory_movements" }, applyChange(setInventoryMovements, TABLE_MAP.inventoryMovements.fromDb))
+        .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, applyChange("orders", setOrders, TABLE_MAP.orders.fromDb))
+        .on("postgres_changes", { event: "*", schema: "public", table: "dining_tables" }, applyChange("tables", setTables, TABLE_MAP.tables.fromDb))
+        .on("postgres_changes", { event: "*", schema: "public", table: "menu_items" }, applyChange("menu", setMenu, TABLE_MAP.menu.fromDb))
+        .on("postgres_changes", { event: "*", schema: "public", table: "inventory_items" }, applyChange("inventory", setInventory, TABLE_MAP.inventory.fromDb))
+        .on("postgres_changes", { event: "*", schema: "public", table: "inventory_movements" }, applyChange("inventoryMovements", setInventoryMovements, TABLE_MAP.inventoryMovements.fromDb))
         .subscribe((status) => {
           if (cancelled) return;
           if (status === "SUBSCRIBED") {
@@ -1007,7 +1014,10 @@ export default function App() {
     // without anyone needing to manually refresh.
     const pollInterval = setInterval(async () => {
       try {
+        if (hasPendingSync()) return; // a save is in flight — don't read mid-write
+        const startedAt = Date.now();
         const [freshOrders, freshTables] = await Promise.all([fetchTable("orders"), fetchTable("tables")]);
+        if (hasPendingSync() || lastLocalWriteAt >= startedAt) return; // a local change happened meanwhile: this read is stale
         if (!cancelled) {
           setOrders(freshOrders);
           setTables(freshTables);
@@ -1031,12 +1041,14 @@ export default function App() {
   const makePersist = (key, setState) => (valueOrUpdater) => {
     let prev;
     let next;
+    lastLocalWriteAt = Date.now();
     setState((current) => {
       prev = current;
       next = typeof valueOrUpdater === "function" ? valueOrUpdater(current) : valueOrUpdater;
       return next;
     });
     syncTable(key, prev, next).then((res) => {
+      lastLocalWriteAt = Date.now();
       if (!res.ok) {
         setState(() => prev); // roll back — the save didn't actually happen
         pushToast(`Couldn't save your last change to ${TABLE_MAP[key].table.replace(/_/g, " ")}. It's been reverted — please try again.`, "error");
