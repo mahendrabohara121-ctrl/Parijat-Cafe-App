@@ -886,7 +886,7 @@ export default function App() {
   const [toasts, setToasts] = useState([]);
   const pushToast = (message, tone = "error", timeoutMs = 6000) => {
     const id = uid();
-    setToasts((t) => [...t, { id, message, tone }]);
+    setToasts((t) => (t.some((x) => x.message === message) ? t : [...t, { id, message, tone }]));
     if (timeoutMs) setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), timeoutMs);
     return id;
   };
@@ -999,32 +999,39 @@ export default function App() {
 
     const connect = () => {
       if (cancelled) return;
-      if (channel) { supabase.removeChannel(channel); }
+      // Detach the old channel FIRST. Removing it fires a CLOSED status on the old subscription;
+      // without the identity check below, that stale CLOSED looked like a fresh outage and
+      // scheduled yet another reconnect — an endless disconnect/reconnect loop.
+      const old = channel;
+      channel = null;
+      if (old) supabase.removeChannel(old);
 
-      channel = supabase
-        .channel("parijat-pos-realtime-" + Date.now()) // unique name per attempt avoids stale-topic reuse issues
+      const ch = supabase.channel("parijat-pos-realtime-" + Date.now()); // unique name per attempt avoids stale-topic reuse issues
+      ch
         .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, applyChange("orders", setOrders, TABLE_MAP.orders.fromDb))
         .on("postgres_changes", { event: "*", schema: "public", table: "dining_tables" }, applyChange("tables", setTables, TABLE_MAP.tables.fromDb))
         .on("postgres_changes", { event: "*", schema: "public", table: "menu_items" }, applyChange("menu", setMenu, TABLE_MAP.menu.fromDb))
         .on("postgres_changes", { event: "*", schema: "public", table: "inventory_items" }, applyChange("inventory", setInventory, TABLE_MAP.inventory.fromDb))
-        .on("postgres_changes", { event: "*", schema: "public", table: "inventory_movements" }, applyChange("inventoryMovements", setInventoryMovements, TABLE_MAP.inventoryMovements.fromDb))
-        .subscribe((status) => {
-          if (cancelled) return;
-          if (status === "SUBSCRIBED") {
-            if (attempt > 0) pushToast("Live sync reconnected.", "success", 3000);
-            attempt = 0; // reset backoff once we're healthy again
-            return;
+        .on("postgres_changes", { event: "*", schema: "public", table: "inventory_movements" }, applyChange("inventoryMovements", setInventoryMovements, TABLE_MAP.inventoryMovements.fromDb));
+      channel = ch;
+      ch.subscribe((status, err) => {
+        if (cancelled || channel !== ch) return; // stale callback from a channel we already replaced
+        if (status === "SUBSCRIBED") {
+          if (attempt > 0) pushToast("Live sync reconnected.", "success", 3000);
+          attempt = 0; // reset backoff once we're healthy again
+          return;
+        }
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+          console.warn("[realtime]", status, err ? (err.message || err) : "");
+          attempt += 1;
+          const delay = Math.min(30000, 1000 * 2 ** attempt); // 2s, 4s, 8s... capped at 30s
+          if (attempt === 1) {
+            pushToast("Live sync disconnected — trying to reconnect…", "warn", delay + 2000);
           }
-          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-            attempt += 1;
-            const delay = Math.min(30000, 1000 * 2 ** attempt); // 2s, 4s, 8s... capped at 30s
-            if (attempt === 1) {
-              pushToast("Live sync disconnected — trying to reconnect…", "warn", delay + 2000);
-            }
-            if (reconnectTimer) clearTimeout(reconnectTimer);
-            reconnectTimer = setTimeout(connect, delay);
-          }
-        });
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(connect, delay);
+        }
+      });
     };
 
     connect();
