@@ -3,7 +3,7 @@ import {
   LayoutDashboard, ClipboardList, LayoutGrid, Package, Wallet, UtensilsCrossed,
   Users, ChefHat, BarChart3, QrCode, ShoppingBag, Gift, Share2, Plus, X, Trash2,
   Check, Clock, Flame, AlertTriangle, TrendingUp, TrendingDown, Search, Menu as MenuIcon, Shield, Eye, EyeOff, LogOut, Truck,
-  CalendarDays, Lock, Unlock, CheckCircle2, CreditCard, Printer
+  CalendarDays, Lock, Unlock, CheckCircle2, CreditCard, Printer, FileText
 } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -96,15 +96,11 @@ const ROLES = [
 ];
 // which modules each role can see. "staff" (Staff Management) and "auditlog" are owner-only.
 const ROLE_ACCESS = {
-  owner: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook", "staff", "auditlog"],
-  manager: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook"],
+  owner: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook", "vouchers", "staff", "auditlog"],
+  manager: ["overview", "orders", "kds", "tables", "purchase", "inventory", "accounting", "menu", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook", "vouchers"],
   cashier: ["overview", "orders", "tables", "accounting", "crm", "sales", "qr", "online", "loyalty", "refer", "creditbook"],
   barista: ["kds", "orders"],
 };
-const SEED_STAFF = [
-  { id: uid(), name: "Owner", username: "owner", password: "owner123", role: "owner", active: true },
-];
-
 /* ---------------- Supabase data layer ---------------- */
 // maps each in-app array to its real Postgres table + field-name translation
 // (JS uses camelCase like tableId, DB columns use snake_case like table_id)
@@ -156,7 +152,7 @@ const TABLE_MAP = {
   expenses: {
     table: "expenses",
     toDb: (e) => ({ id: e.id, category: e.category, description: e.description || null, amount: e.amount, date: e.date, payment_method: e.paymentMethod || "cash" }),
-    fromDb: (r) => ({ id: r.id, category: r.category, description: r.description, amount: Number(r.amount), date: r.date, paymentMethod: r.payment_method || "cash" }),
+    fromDb: (r) => ({ id: r.id, category: r.category, description: r.description, amount: Number(r.amount), date: r.date, paymentMethod: r.payment_method || "cash", voucherNo: r.voucher_no || null }),
   },
   customers: {
     table: "customers",
@@ -178,13 +174,13 @@ const TABLE_MAP = {
     fromDb: (r) => ({
       id: r.id, itemId: r.item_id, itemName: r.item_name, quantity: Number(r.quantity), unit: r.unit,
       unitCost: Number(r.unit_cost), totalCost: Number(r.total_cost), supplier: r.supplier, notes: r.notes, date: r.date,
-      paymentMethod: r.payment_method || "cash", category: r.category || "Other", costType: r.cost_type || (r.item_id ? "cogs" : "operating"),
+      paymentMethod: r.payment_method || "cash", category: r.category || "Other", costType: r.cost_type || (r.item_id ? "cogs" : "operating"), voucherNo: r.voucher_no || null,
     }),
   },
   cashDeposits: {
     table: "cash_deposits",
     toDb: (d) => ({ id: d.id, amount: d.amount, notes: d.notes || null, date: d.date }),
-    fromDb: (r) => ({ id: r.id, amount: Number(r.amount), notes: r.notes, date: r.date }),
+    fromDb: (r) => ({ id: r.id, amount: Number(r.amount), notes: r.notes, date: r.date, voucherNo: r.voucher_no || null }),
   },
   creditTransactions: {
     table: "credit_transactions",
@@ -196,7 +192,7 @@ const TABLE_MAP = {
     fromDb: (r) => ({
       id: r.id, customerId: r.customer_id, customerName: r.customer_name, type: r.type,
       orderId: r.order_id, amount: Number(r.amount), paymentMethod: r.payment_method,
-      notes: r.notes, date: r.date, createdBy: r.created_by,
+      notes: r.notes, date: r.date, createdBy: r.created_by, voucherNo: r.voucher_no || null,
     }),
   },
 };
@@ -312,18 +308,39 @@ async function saveBusinessDay(day) {
 
 /* ---------------- audit log ---------------- */
 // fire-and-forget: never blocks or breaks the action it's logging, even if the insert fails
+// The browser never talks to staff / sessions / audit tables directly any more. Every sensitive
+// call carries a random session token that the server validates (and expires after 12h idle).
+let sessionToken = null;
+let onSessionExpired = null;
+async function rpcAuthed(fn, args = {}) {
+  const res = await supabase.rpc(fn, { ...args, p_token: sessionToken });
+  if (res.error && /session_expired/.test(res.error.message || "")) {
+    if (onSessionExpired) onSessionExpired();
+  }
+  return res;
+}
+// fire-and-forget: never blocks or breaks the action it's logging. (The server records WHO did it
+// from the session, so the "actor" argument is kept only so existing call sites don't change.)
 async function logAudit(actor, action, details) {
+  if (!sessionToken) return;
   try {
-    const { error } = await supabase.from("audit_log").insert({ actor: actor || "Unknown", action, details: details || null });
+    const { error } = await rpcAuthed("log_audit", { p_action: action, p_details: details || null });
     if (error) console.error("audit log failed", error);
   } catch (e) {
     console.error("audit log failed", e);
   }
 }
 async function fetchAuditLog(limit = 500) {
-  const { data, error } = await supabase.from("audit_log").select("*").order("at", { ascending: false }).limit(limit);
+  const { data, error } = await rpcAuthed("get_audit_log", { p_limit: limit });
   if (error) { console.error("fetch audit_log failed", error); return []; }
-  return data;
+  return data || [];
+}
+
+// vouchers (the voucher_register table is read-only for the browser; the server writes it)
+async function fetchDayVouchers(dateKey) {
+  const { data, error } = await supabase.from("voucher_register").select("*").eq("vdate", dateKey).eq("status", "active").order("created_at", { ascending: true });
+  if (error) { console.error("fetch vouchers failed", error); return []; }
+  return data || [];
 }
 
 /* ---------------- printable day-close report ---------------- */
@@ -332,7 +349,8 @@ const PAYMENT_LABELS = {
   card: "Card", bank: "Bank Transfer", credit: "Credit",
 };
 
-function buildDayCloseReportHtml(businessDate, day, orders, expenses, purchases, cashDeposits, creditTransactions) {
+function buildDayCloseReportHtml(businessDate, day, orders, expenses, purchases, cashDeposits, creditTransactions, vouchers = []) {
+  const escH = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]));
   const paidOrders = orders.filter((o) => o.status === "paid" && (o.paidAt || o.createdAt || "").slice(0, 10) === businessDate);
   const voidedToday = orders.filter((o) => o.status === "cancelled" && o.cancelledFromPaid && (o.paidAt || o.createdAt || "").slice(0, 10) === businessDate);
   const dayExpenses = expenses.filter((e) => e.date === businessDate);
@@ -487,6 +505,13 @@ function buildDayCloseReportHtml(businessDate, day, orders, expenses, purchases,
     </table>
   `) : ""}
 
+  ${vouchers.length ? section("Vouchers for the Day", `
+    <table>
+      <tr><th>Voucher No</th><th>Details</th><th>Method</th><th class="num">Amount</th></tr>
+      ${vouchers.map((v) => `<tr><td>${escH(v.voucher_no)}</td><td>${escH(v.party || "")}${v.description ? " — " + escH(v.description) : ""}</td><td>${escH(v.method || "")}</td><td class="num">${fmtMoney(v.amount)}</td></tr>`).join("")}
+    </table>
+  `) : ""}
+
   ${section("Net for the Day", `
     <table>
       ${row("Total Sales", fmtMoney(totalSales))}
@@ -508,12 +533,19 @@ function buildDayCloseReportHtml(businessDate, day, orders, expenses, purchases,
 </html>`;
 }
 
-function printDayCloseReport(businessDate, day, orders, expenses, purchases, cashDeposits, creditTransactions) {
-  const html = buildDayCloseReportHtml(businessDate, day, orders, expenses, purchases, cashDeposits, creditTransactions);
+function printDayCloseReport(businessDate, day, orders, expenses, purchases, cashDeposits, creditTransactions, vouchersOrPromise) {
+  // open the window right away (still inside the click, so pop-up blockers allow it), fill it once vouchers are known
   const win = window.open("", "_blank");
   if (!win) { alert("Please allow pop-ups for this site to print the report."); return; }
-  win.document.write(html);
-  win.document.close();
+  win.document.write("<p style='font-family:sans-serif;padding:20px'>Preparing report…</p>");
+  Promise.resolve(vouchersOrPromise !== undefined ? vouchersOrPromise : fetchDayVouchers(businessDate))
+    .catch(() => [])
+    .then((vouchers) => {
+      const html = buildDayCloseReportHtml(businessDate, day, orders, expenses, purchases, cashDeposits, creditTransactions, vouchers || []);
+      win.document.open();
+      win.document.write(html);
+      win.document.close();
+    });
 }
 
 /* ---------------- small UI atoms ---------------- */
@@ -639,7 +671,7 @@ function Login({ staff, onLogin, error }) {
         <Btn onClick={submit} variant="primary" style={{ width: "100%", justifyContent: "center", marginBottom: 16 }}>Sign In</Btn>
 
         <div style={{ fontSize: 11.5, color: T.plum, opacity: 0.7, background: T.cream, padding: 10, borderRadius: 8, lineHeight: 1.5 }}>
-          First time here? Default owner login is <strong>owner</strong> / <strong>owner123</strong>. Sign in and change it (or add real staff) from Staff & Roles.
+          Need an account or a password reset? Ask the owner.
         </div>
       </div>
     </div>
@@ -659,9 +691,9 @@ function ForcePasswordChange({ currentUser, onDone, onLogout }) {
     if (pw1.length < 6) { setErr("Password must be at least 6 characters."); return; }
     if (pw1 !== pw2) { setErr("Passwords don't match."); return; }
     setSaving(true);
-    const { error: pwErr } = await supabase.rpc("update_staff_password", { p_id: currentUser.id, p_password: pw1 });
+    const { error: pwErr } = await rpcAuthed("set_staff_password", { p_id: currentUser.id, p_password: pw1 });
     if (pwErr) { setErr("Couldn't set password: " + pwErr.message); setSaving(false); return; }
-    const { error: flagErr } = await supabase.rpc("clear_must_change_password", { p_id: currentUser.id });
+    const { error: flagErr } = await rpcAuthed("clear_own_must_change");
     if (flagErr) { setErr("Password saved, but couldn't clear the reset flag: " + flagErr.message); setSaving(false); return; }
     logAudit(currentUser.name, "PASSWORD_CHANGED", { self: true });
     onDone({ ...currentUser, must_change_password: false });
@@ -804,13 +836,13 @@ function BusinessDayControl({
             <Btn variant="danger" onClick={() => {
               const amount = Number(actualCash);
               if (!Number.isFinite(amount) || amount < 0) return alert("Enter the actual cash counted.");
-              onCloseDay(amount, closeNotes, { expectedCash, totalSales, paidOrders: paidOrders.length, cashSales, cashExpenses, cashPurchases, cashDeposited });
+              const vouchersPromise = onCloseDay(amount, closeNotes, { expectedCash, totalSales, paidOrders: paidOrders.length, cashSales, cashExpenses, cashPurchases, cashDeposited });
               // print the report using the just-entered actual cash, even though state
               // hasn't re-rendered with the closed status yet
               printDayCloseReport(
                 businessDate,
                 { ...businessDay, status: "closed", actualClosingCash: amount, closeNotes },
-                orders, expenses, purchases, cashDeposits, creditTransactions
+                orders, expenses, purchases, cashDeposits, creditTransactions, vouchersPromise
               );
               setCloseModal(false);
             }}><Lock size={14} /> Confirm Close Day &amp; Print</Btn>
@@ -893,6 +925,16 @@ export default function App() {
   const dismissToast = (id) => setToasts((t) => t.filter((x) => x.id !== id));
 
   useEffect(() => {
+    onSessionExpired = () => {
+      sessionToken = null;
+      try { localStorage.removeItem("parijat_session_token"); } catch (e) { /* ignore */ }
+      setCurrentUser(null);
+      setLoginError("Your session expired. Please sign in again.");
+    };
+    return () => { onSessionExpired = null; };
+  }, []);
+
+  useEffect(() => {
     const link = document.createElement("link");
     link.rel = "stylesheet";
     link.href = "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap";
@@ -937,22 +979,22 @@ export default function App() {
       if (!inv.length) syncTable("inventory", [], SEED_INVENTORY);
       if (!cust.length) syncTable("customers", [], SEED_CUSTOMERS);
 
-      const { data: staffList } = await supabase.rpc("list_staff");
-      setStaff(staffList || []);
-
-      // restore a previous login session (if any) so refreshing doesn't force a re-login
+      // restore a previous login (if any) so refreshing doesn't force a re-login. The server checks the token.
       try {
-        const savedId = localStorage.getItem("parijat_session_id");
-        if (savedId && staffList) {
-          const match = staffList.find((s) => s.id === savedId && s.active);
-          if (match) {
-            setCurrentUser(match);
-            setActive(ROLE_ACCESS[match.role][0] || "overview");
-          } else {
-            localStorage.removeItem("parijat_session_id"); // account deleted/deactivated since last login
+        const savedToken = localStorage.getItem("parijat_session_token");
+        localStorage.removeItem("parijat_session_id"); // old, insecure session key from earlier versions
+        if (savedToken) {
+          const { data: me, error: meErr } = await supabase.rpc("resume_session", { p_token: savedToken });
+          const user = me && me[0];
+          if (!meErr && user && user.active) {
+            sessionToken = savedToken;
+            setCurrentUser(user);
+            setActive(ROLE_ACCESS[user.role][0] || "overview");
+          } else if (meErr && /session_expired/.test(meErr.message || "")) {
+            localStorage.removeItem("parijat_session_token"); // expired or revoked
           }
         }
-      } catch (e) { /* localStorage unavailable — just skip session restore */ }
+      } catch (e) { /* localStorage / network unavailable — just show the login screen */ }
 
       setLoading(false);
       } catch (e) {
@@ -1066,6 +1108,19 @@ export default function App() {
   // Supabase in the background, and if the sync fails: tell the user via a toast and
   // roll the local state back to what it was before, so the UI never lies about what
   // actually got saved.
+  const VOUCHER_KEYS = { expenses: true, purchases: true, cashDeposits: true, creditTransactions: true };
+  // The database assigns the voucher number while saving. Fetch just the new numbers and merge ONLY that field,
+  // so nothing else on screen is overwritten.
+  const mergeVoucherNumbers = async (key, setState) => {
+    try {
+      const since = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      const { data } = await supabase.from("voucher_register").select("source_id,voucher_no").eq("source_table", TABLE_MAP[key].table).gte("created_at", since);
+      if (!data || !data.length) return;
+      const map = new Map(data.map((r) => [r.source_id, r.voucher_no]));
+      setState((cur) => cur.map((r) => (map.has(r.id) && r.voucherNo !== map.get(r.id) ? { ...r, voucherNo: map.get(r.id) } : r)));
+    } catch (e) { /* the number will appear after the next reload */ }
+  };
+
   const makePersist = (key, setState) => (valueOrUpdater) => {
     const prev = liveRef.current[key] || [];
     const next = typeof valueOrUpdater === "function" ? valueOrUpdater(prev) : valueOrUpdater;
@@ -1074,6 +1129,7 @@ export default function App() {
     setState(next);
     syncTable(key, prev, next).then((res) => {
       lastLocalWriteAt = Date.now();
+      if (res.ok && VOUCHER_KEYS[key]) mergeVoucherNumbers(key, setState);
       if (!res.ok) {
         liveRef.current[key] = prev;
         setState(prev); // roll back — the save didn't actually happen
@@ -1096,7 +1152,7 @@ export default function App() {
     cashDeposits: makePersist("cashDeposits", setCashDeposits),
     creditTransactions: makePersist("creditTransactions", setCreditTransactions),
     refreshStaff: async () => {
-      const { data, error } = await supabase.rpc("list_staff");
+      const { data, error } = await rpcAuthed("admin_list_staff");
       if (error) { pushToast("Couldn't refresh staff list: " + error.message, "error"); return; }
       setStaff(data || []);
     },
@@ -1164,8 +1220,18 @@ export default function App() {
     logAudit(currentUser?.name, "DAY_OPENED", { date: businessDate, openingCash: Number(openingCash) });
   };
 
+  // Sales summary vouchers: one per payment method for the day (cash CR, bank/wallet BR, credit JV). Server-side, idempotent.
+  const issueDayVouchers = async (dateKey) => {
+    const { data, error } = await rpcAuthed("issue_day_vouchers", { p_date: dateKey });
+    if (error) { pushToast("Sales vouchers were not issued: " + error.message, "error", 12000); return null; }
+    const issued = data?.issued || [];
+    if (issued.length) pushToast("Sales vouchers issued: " + issued.map((v) => v.voucher_no).join(", "), "success", 9000);
+    if (data?.changed?.length) pushToast("Sales changed after a voucher was issued (" + data.changed.map((c) => c.voucher_no).join(", ") + "). Post an adjustment in the office software.", "warn", 15000);
+    return data;
+  };
+
   const closeBusinessDay = (actualClosingCash, closeNotes, summary) => {
-    if (currentBusinessDay.status !== "open") return;
+    if (currentBusinessDay.status !== "open") return Promise.resolve([]);
     updateBusinessDay(businessDate, (day) => ({
       ...day,
       status: "closed",
@@ -1177,6 +1243,7 @@ export default function App() {
       audit: [...(day.audit || []), { action: "DAY_CLOSED", at: new Date().toISOString(), by: currentUser?.name || "Unknown", actualClosingCash: Number(actualClosingCash), ...summary, notes: closeNotes || "" }],
     }));
     logAudit(currentUser?.name, "DAY_CLOSED", { date: businessDate, actualClosingCash: Number(actualClosingCash), ...summary });
+    return issueDayVouchers(businessDate).then(() => fetchDayVouchers(businessDate));
   };
 
   const reopenBusinessDay = (reason) => {
@@ -1206,6 +1273,7 @@ export default function App() {
     { id: "loyalty", label: "Loyalty & Rewards", icon: Gift, group: "Grow" },
     { id: "refer", label: "Refer & Earn", icon: Share2, group: "Grow" },
     { id: "creditbook", label: "Credit Book", icon: CreditCard, group: "Operate" },
+    { id: "vouchers", label: "Voucher Register", icon: FileText, group: "Operate" },
     { id: "staff", label: "Staff & Roles", icon: Shield, group: "Admin" },
     { id: "auditlog", label: "Audit Log", icon: Lock, group: "Admin" },
   ];
@@ -1214,7 +1282,7 @@ export default function App() {
   const visibleNav = NAV.filter((n) => allowed.includes(n.id));
 
   const login = async (username, password) => {
-    const { data, error } = await supabase.rpc("login_staff", { p_username: username.trim(), p_password: password });
+    const { data, error } = await supabase.rpc("login_session", { p_username: username.trim(), p_password: password });
     if (error) {
       if (error.message && error.message.includes("ACCOUNT_LOCKED")) {
         const until = error.message.split(":")[1] || "shortly";
@@ -1222,27 +1290,24 @@ export default function App() {
       } else {
         setLoginError("Something went wrong reaching the server. Try again.");
       }
-      logAudit(username, "LOGIN_FAILED", { reason: "error", message: error.message });
       return;
     }
     const found = data && data[0];
-    if (!found) {
-      setLoginError("Incorrect username or password.");
-      logAudit(username, "LOGIN_FAILED", { reason: "bad_credentials" });
-      return;
-    }
-    if (!found.active) { setLoginError("This account has been deactivated. Ask the owner to reactivate it."); return; }
+    if (!found) { setLoginError("Incorrect username or password."); return; }
+    if (!found.active || !found.token) { setLoginError("This account has been deactivated. Ask the owner to reactivate it."); return; }
     setLoginError("");
-    setCurrentUser(found);
-    logAudit(found.name, "LOGIN_SUCCESS", { role: found.role });
-    try { localStorage.setItem("parijat_session_id", found.id); } catch (e) { /* ignore */ }
-    setActive(ROLE_ACCESS[found.role][0] || "overview");
+    sessionToken = found.token;
+    try { localStorage.setItem("parijat_session_token", found.token); localStorage.removeItem("parijat_session_id"); } catch (e) { /* ignore */ }
+    const { token: _token, ...user } = found;
+    setCurrentUser(user);
+    setActive(ROLE_ACCESS[user.role][0] || "overview");
   };
   const logout = () => {
-    if (currentUser) logAudit(currentUser.name, "LOGOUT", {});
+    if (sessionToken) supabase.rpc("logout", { p_token: sessionToken }); // server ends the session + logs it
+    sessionToken = null;
     setCurrentUser(null);
     setActive("overview");
-    try { localStorage.removeItem("parijat_session_id"); } catch (e) { /* ignore */ }
+    try { localStorage.removeItem("parijat_session_token"); } catch (e) { /* ignore */ }
   };
 
   if (loadError) {
@@ -1378,6 +1443,7 @@ export default function App() {
           {active === "loyalty" && <Loyalty customers={customers} setCustomers={persist.customers} />}
           {active === "refer" && <ReferEarn customers={customers} referrals={referrals} setReferrals={persist.referrals} setCustomers={persist.customers} />}
           {active === "creditbook" && <CreditBook customers={customers} creditTransactions={creditTransactions} setCreditTransactions={persist.creditTransactions} currentUser={currentUser} businessDay={currentBusinessDay} />}
+          {active === "vouchers" && <VoucherRegister issueDayVouchers={issueDayVouchers} businessDate={businessDate} />}
           {active === "staff" && <StaffManagement staff={staff} refreshStaff={persist.refreshStaff} currentUser={currentUser} />}
           {active === "auditlog" && <AuditLogView />}
         </div>
@@ -1632,10 +1698,9 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     if (freshOrder.status === "paid") { setPayOrder(null); return true; }
     setPaying(true);
     try {
-      const { data, error } = await supabase.rpc("pay_order", {
+      const { data, error } = await rpcAuthed("pay_order", {
         p_order_id: freshOrder.id,
         p_method: method,
-        p_actor_id: currentUser?.id,
         p_customer_name: customerNameOverride || freshOrder.customerName || null,
         p_customer_id: customerId,
       });
@@ -1704,7 +1769,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     const order = voidTarget;
     try {
       // server restores stock from the ledger, reverses loyalty and the credit-book entry, atomically
-      const { error } = await supabase.rpc("void_order", { p_order_id: order.id, p_reason: voidReason.trim(), p_actor_id: currentUser?.id });
+      const { error } = await rpcAuthed("void_order", { p_order_id: order.id, p_reason: voidReason.trim() });
       if (error) throw error;
       logAudit(currentUser?.name, "BILL_VOIDED", { orderId: order.id, table: order.tableName, total: order.total, reason: voidReason.trim() });
       await refreshData(order.id);
@@ -2359,9 +2424,9 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
     ];
     if (scope === "all") { summarySheet.push({ Metric: "Cash in Hand right now (Rs)", Value: cashBalance }); summarySheet.push({ Metric: "Bank Balance right now (Rs)", Value: bankBalance }); }
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summarySheet), "Summary");
-    const expenseSheet = scopedExpenses.map((e) => ({ Date: e.date, Category: e.category, Description: e.description, "Amount (Rs)": e.amount, "Paid Via": PAYMENT_METHODS.find((p) => p.id === e.paymentMethod)?.label || e.paymentMethod }));
+    const expenseSheet = scopedExpenses.map((e) => ({ Voucher: e.voucherNo || "", Date: e.date, Category: e.category, Description: e.description, "Amount (Rs)": e.amount, "Paid Via": PAYMENT_METHODS.find((p) => p.id === e.paymentMethod)?.label || e.paymentMethod }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(expenseSheet), "Expenses");
-    if (scopedDeposits.length > 0) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(scopedDeposits.map((d) => ({ Date: d.date, "Amount (Rs)": d.amount, Notes: d.notes }))), "Cash Deposits");
+    if (scopedDeposits.length > 0) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(scopedDeposits.map((d) => ({ Voucher: d.voucherNo || "", Date: d.date, "Amount (Rs)": d.amount, Notes: d.notes }))), "Cash Deposits");
     XLSX.writeFile(wb, `parijat-cafe-accounting-${scope === "today" ? today() : "all"}.xlsx`);
   };
 
@@ -2425,7 +2490,7 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
       </Card>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}><h3 style={{ fontFamily: "inherit", fontSize: 16, color: T.dusk }}>Expenses</h3><Btn variant="primary" onClick={() => setModal(true)}><Plus size={15} /> Add Expense</Btn></div>
-      <Card style={{ padding: 0, overflow: "hidden" }}>{expenses.length === 0 ? <Empty text="No expenses recorded yet." /> : <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}><thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}><th style={{ padding: "10px 14px" }}>Category</th><th>Description</th><th>Amount</th><th>Paid Via</th><th>Date</th><th></th></tr></thead><tbody>{expenses.slice().reverse().map((e) => <tr key={e.id} style={{ borderTop: `1px solid ${T.line}` }}><td style={{ padding: "10px 14px" }}><Pill>{e.category}</Pill></td><td>{e.description || "—"}</td><td>{money(e.amount)}</td><td>{PAYMENT_METHODS.find((p) => p.id === e.paymentMethod)?.label || "Cash"}</td><td style={{ opacity: 0.7 }}>{e.date}</td><td><button onClick={() => removeExpense(e.id)} style={{ background: "none", border: "none", cursor: "pointer", color: T.plum, opacity: 0.5 }}><Trash2 size={13} /></button></td></tr>)}</tbody></table>}</Card>
+      <Card style={{ padding: 0, overflow: "hidden" }}>{expenses.length === 0 ? <Empty text="No expenses recorded yet." /> : <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}><thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}><th style={{ padding: "10px 14px" }}>Category</th><th>Description</th><th>Amount</th><th>Paid Via</th><th>Date</th><th>Voucher</th><th></th></tr></thead><tbody>{expenses.slice().reverse().map((e) => <tr key={e.id} style={{ borderTop: `1px solid ${T.line}` }}><td style={{ padding: "10px 14px" }}><Pill>{e.category}</Pill></td><td>{e.description || "—"}</td><td>{money(e.amount)}</td><td>{PAYMENT_METHODS.find((p) => p.id === e.paymentMethod)?.label || "Cash"}</td><td style={{ opacity: 0.7 }}>{e.date}</td><td style={{ fontFamily: "monospace", fontSize: 12 }}>{e.voucherNo || "—"}</td><td><button onClick={() => removeExpense(e.id)} style={{ background: "none", border: "none", cursor: "pointer", color: T.plum, opacity: 0.5 }}><Trash2 size={13} /></button></td></tr>)}</tbody></table>}</Card>
 
       {modal && <Modal title="Add Expense" onClose={() => setModal(false)}><Field label="Category"><select style={inputStyle} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}><option>Ingredients</option><option>Rent</option><option>Utilities</option><option>Staff Wages</option><option>Maintenance</option><option>Marketing</option><option>Other</option></select></Field><Field label="Description"><input style={inputStyle} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field><Field label="Amount (Rs)"><input type="number" style={inputStyle} value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></Field><Field label="Paid Via"><select style={inputStyle} value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}>{PAYMENT_METHODS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}</select></Field><Btn variant="primary" onClick={addExpense} style={{ width: "100%", justifyContent: "center" }}>Add Expense</Btn></Modal>}
       {depositModal && <Modal title="Log Cash Deposit" onClose={() => setDepositModal(false)}><div style={{ fontSize: 12.5, color: T.plum, marginBottom: 14 }}>Record cash you physically took from the till and deposited into the cafe's bank account. This moves the amount from Cash in Hand to Bank Balance.</div><Field label="Amount Deposited (Rs)"><input type="number" style={inputStyle} value={depositAmount} onChange={(e) => setDepositAmount(e.target.value)} autoFocus /></Field><Field label="Notes"><input style={inputStyle} value={depositNotes} onChange={(e) => setDepositNotes(e.target.value)} placeholder="Optional — e.g. bank branch, slip number" /></Field><Btn variant="primary" onClick={addDeposit} style={{ width: "100%", justifyContent: "center" }}>Log Deposit</Btn></Modal>}
@@ -3036,7 +3101,7 @@ function CreditBook({ customers, creditTransactions, setCreditTransactions, curr
           <h3 style={{ fontSize: 14, color: T.dusk, marginBottom: 12 }}>Transaction History — {balances.find((b) => b.customerId === expandedCustomer)?.customerName}</h3>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead><tr style={{ textAlign: "left", color: T.plum, opacity: 0.65, fontSize: 11, textTransform: "uppercase" }}>
-              <th style={{ padding: "6px 4px" }}>Date</th><th>Type</th><th>Amount</th><th>Paid Via</th><th>Notes</th>
+              <th style={{ padding: "6px 4px" }}>Date</th><th>Type</th><th>Amount</th><th>Paid Via</th><th>Notes</th><th>Voucher</th>
             </tr></thead>
             <tbody>
               {creditTransactions.filter((c) => c.customerId === expandedCustomer).slice().reverse().map((c) => (
@@ -3045,7 +3110,7 @@ function CreditBook({ customers, creditTransactions, setCreditTransactions, curr
                   <td><Pill tone={c.type === "sale" ? "bad" : "good"}>{c.type === "sale" ? "Credit Sale" : "Repayment"}</Pill></td>
                   <td>{money(c.amount)}</td>
                   <td>{c.paymentMethod ? (PAYMENT_METHODS.find((p) => p.id === c.paymentMethod)?.label || c.paymentMethod) : "—"}</td>
-                  <td style={{ opacity: 0.75 }}>{c.notes || "—"}</td>
+                  <td style={{ opacity: 0.75 }}>{c.notes || "—"}</td><td style={{ fontFamily: "monospace", fontSize: 12 }}>{c.voucherNo || "—"}</td>
                 </tr>
               ))}
             </tbody>
@@ -3071,6 +3136,140 @@ function CreditBook({ customers, creditTransactions, setCreditTransactions, curr
           <Btn variant="primary" onClick={confirmRepay} style={{ width: "100%", justifyContent: "center" }}>Log Repayment</Btn>
         </Modal>
       )}
+    </div>
+  );
+}
+
+/* ================= VOUCHER REGISTER ================= */
+const VOUCHER_TYPE_LABEL = { CR: "Cash Receipt", BR: "Bank Receipt", CP: "Cash Payment", BP: "Bank Payment", CV: "Contra", JV: "Journal" };
+
+function VoucherRegister({ issueDayVouchers, businessDate }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [from, setFrom] = useState(() => new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+  const [to, setTo] = useState(today());
+  const [vtype, setVtype] = useState("all");
+  const [search, setSearch] = useState("");
+  const [checkDate, setCheckDate] = useState(businessDate || today());
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState(null);
+
+  const load = async () => {
+    setLoading(true);
+    const { data, error } = await supabase.from("voucher_register").select("*")
+      .gte("vdate", from).lte("vdate", to)
+      .order("vdate", { ascending: false }).order("created_at", { ascending: false }).limit(2000);
+    if (error) { console.error("fetch voucher_register failed", error); setRows([]); }
+    else setRows(data || []);
+    setLoading(false);
+  };
+  useEffect(() => { load(); }, [from, to]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const filtered = rows.filter((v) => {
+    if (vtype !== "all" && v.vtype !== vtype) return false;
+    const q = search.trim().toLowerCase();
+    if (q && !`${v.voucher_no} ${v.party || ""} ${v.description || ""} ${v.method || ""}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const active = filtered.filter((v) => v.status === "active");
+  const sum = (types) => active.filter((v) => types.includes(v.vtype)).reduce((s, v) => s + Number(v.amount || 0), 0);
+  const receipts = sum(["CR", "BR"]);
+  const payments = sum(["CP", "BP"]);
+
+  const runCheck = async () => {
+    setChecking(true);
+    const res = await issueDayVouchers(checkDate);
+    setCheckResult(res);
+    await load();
+    setChecking(false);
+  };
+
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const sheet = filtered.map((v) => ({
+      "Voucher No": v.voucher_no, Date: v.vdate, Type: v.vtype, "Type Name": VOUCHER_TYPE_LABEL[v.vtype] || v.vtype,
+      Party: v.party || "", Description: v.description || "", Method: v.method || "",
+      "Amount (Rs)": Number(v.amount || 0), Bills: v.bills ?? "", Status: v.status,
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "Vouchers");
+    XLSX.writeFile(wb, `parijat-cafe-vouchers-${from}-to-${to}.xlsx`);
+  };
+
+  return (
+    <div>
+      <Card style={{ padding: 18, marginBottom: 18 }}>
+        <div style={{ fontSize: 12.5, color: T.plum, lineHeight: 1.6 }}>
+          Every expense, purchase, bank deposit and credit repayment gets a voucher number when it is saved. Sales get one summary voucher per payment method when the business day is closed.
+          <br /><strong>CR</strong> cash receipt · <strong>BR</strong> bank/wallet receipt · <strong>CP</strong> cash payment · <strong>BP</strong> bank payment · <strong>CV</strong> contra (cash to bank) · <strong>JV</strong> journal (credit). A deleted entry keeps its number here, marked deleted.
+        </div>
+      </Card>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 14, marginBottom: 18 }}>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Vouchers (active)</div><div style={{ fontSize: 22, fontWeight: 700, color: T.dusk }}>{active.length}</div></Card>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Receipts (CR + BR)</div><div style={{ fontSize: 22, fontWeight: 700, color: "#15803D" }}>{money(receipts)}</div></Card>
+        <Card style={{ padding: 16 }}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Payments (CP + BP)</div><div style={{ fontSize: 22, fontWeight: 700, color: T.red }}>{money(payments)}</div></Card>
+      </div>
+
+      <Card style={{ padding: 16, marginBottom: 18 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: T.dusk, marginBottom: 6 }}>Sales vouchers for a day</div>
+        <div style={{ fontSize: 12, color: T.plum, marginBottom: 10 }}>They are issued automatically when you close the day. Use this for a day that was missed, or to re-check a day after a void.</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <input type="date" style={{ ...inputStyle, width: 170 }} value={checkDate} onChange={(e) => setCheckDate(e.target.value)} />
+          <Btn variant="primary" onClick={runCheck} disabled={checking}>{checking ? "Checking…" : "Issue / re-check"}</Btn>
+        </div>
+        {checkResult && (
+          <div style={{ marginTop: 10, fontSize: 12.5, color: T.plum, lineHeight: 1.6 }}>
+            Issued {checkResult.issued?.length || 0} new · already issued {checkResult.existing?.length || 0}
+            {checkResult.changed?.length > 0 && (
+              <div style={{ color: T.red }}>
+                Changed since issue: {checkResult.changed.map((c) => `${c.voucher_no} (was ${money(c.issued_amount)}, now ${money(c.current_amount)})`).join("; ")} — post an adjustment in the office software.
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <input type="date" style={{ ...inputStyle, width: 160 }} value={from} onChange={(e) => setFrom(e.target.value)} />
+          <span style={{ fontSize: 12, color: T.plum }}>to</span>
+          <input type="date" style={{ ...inputStyle, width: 160 }} value={to} onChange={(e) => setTo(e.target.value)} />
+          <select style={{ ...inputStyle, width: 160 }} value={vtype} onChange={(e) => setVtype(e.target.value)}>
+            <option value="all">All types</option>
+            {Object.entries(VOUCHER_TYPE_LABEL).map(([k, l]) => <option key={k} value={k}>{k} — {l}</option>)}
+          </select>
+          <input style={{ ...inputStyle, width: 200 }} placeholder="Search voucher, party…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn variant="ghost" onClick={load}>Refresh</Btn>
+          <Btn variant="primary" onClick={exportToExcel}><Download size={15} /> Export to Excel</Btn>
+        </div>
+      </div>
+
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        {loading ? <Empty text="Loading vouchers…" /> : filtered.length === 0 ? <Empty text="No vouchers in this range yet." /> : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: 860, borderCollapse: "collapse", fontSize: 13 }}>
+              <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}>
+                <th style={{ padding: "10px 14px" }}>Voucher No</th><th>Date</th><th>Type</th><th>Party / Details</th><th>Method</th><th style={{ textAlign: "right" }}>Amount</th><th>Status</th>
+              </tr></thead>
+              <tbody>
+                {filtered.map((v) => (
+                  <tr key={v.id} style={{ borderTop: `1px solid ${T.line}`, opacity: v.status === "deleted" ? 0.5 : 1 }}>
+                    <td style={{ padding: "9px 14px", fontFamily: "monospace", fontWeight: 600 }}>{v.voucher_no}</td>
+                    <td>{v.vdate}</td>
+                    <td><Pill tone={["CR", "BR"].includes(v.vtype) ? "good" : ["CP", "BP"].includes(v.vtype) ? "bad" : "neutral"}>{v.vtype}</Pill></td>
+                    <td>{v.party || "—"}{v.description ? <span style={{ color: T.plum, opacity: 0.8 }}> — {v.description}</span> : null}</td>
+                    <td style={{ textTransform: "capitalize" }}>{v.method || "—"}</td>
+                    <td style={{ textAlign: "right", fontWeight: 600 }}>{money(v.amount)}</td>
+                    <td>{v.status === "deleted" ? <Pill tone="bad">Deleted</Pill> : <Pill tone="good">Active</Pill>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
@@ -3184,6 +3383,7 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
   const [showPw, setShowPw] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  useEffect(() => { refreshStaff(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const openNew = () => { setEditing(null); setForm({ name: "", username: "", password: "", role: "cashier" }); setShowPw(false); setModal(true); };
   const openEdit = (s) => { setEditing(s.id); setForm({ name: s.name, username: s.username, password: "", role: s.role }); setShowPw(false); setModal(true); };
 
@@ -3195,16 +3395,16 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
     if (usernameTaken) { alert("That username is already taken — pick another."); return; }
     setSaving(true);
     if (editing) {
-      const { error } = await supabase.rpc("update_staff", { p_id: editing, p_name: form.name, p_username: form.username, p_role: form.role });
+      const { error } = await rpcAuthed("admin_update_staff", { p_id: editing, p_name: form.name, p_username: form.username, p_role: form.role });
       if (error) { alert("Couldn't save changes: " + error.message); setSaving(false); return; }
       if (form.password) {
-        const { error: pwErr } = await supabase.rpc("update_staff_password", { p_id: editing, p_password: form.password });
+        const { error: pwErr } = await rpcAuthed("set_staff_password", { p_id: editing, p_password: form.password });
         if (pwErr) { alert("Name/role saved, but password update failed: " + pwErr.message); }
         else logAudit(currentUser.name, "STAFF_PASSWORD_RESET", { targetId: editing, targetName: form.name });
       }
       logAudit(currentUser.name, "STAFF_UPDATED", { targetId: editing, name: form.name, username: form.username, role: form.role });
     } else {
-      const { error } = await supabase.rpc("create_staff", { p_name: form.name, p_username: form.username, p_password: form.password, p_role: form.role, p_must_change_password: true });
+      const { error } = await rpcAuthed("admin_create_staff", { p_name: form.name, p_username: form.username, p_password: form.password, p_role: form.role, p_must_change_password: true });
       if (error) { alert("Couldn't create account: " + error.message); setSaving(false); return; }
       logAudit(currentUser.name, "STAFF_CREATED", { name: form.name, username: form.username, role: form.role });
     }
@@ -3215,7 +3415,7 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
 
   const forceReset = async (s) => {
     if (!confirm(`Force ${s.name} to set a new password at their next login?`)) return;
-    const { error } = await supabase.rpc("flag_must_change_password", { p_id: s.id });
+    const { error } = await rpcAuthed("admin_flag_reset", { p_id: s.id });
     if (error) { alert("Couldn't flag account: " + error.message); return; }
     logAudit(currentUser.name, "STAFF_FORCED_RESET", { targetId: s.id, targetName: s.name });
     alert(`${s.name} will be asked to set a new password next time they log in.`);
@@ -3223,7 +3423,7 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
 
   const toggleActive = async (s) => {
     if (s.id === currentUser.id) { alert("You can't deactivate the account you're currently signed in with."); return; }
-    const { error } = await supabase.rpc("set_staff_active", { p_id: s.id, p_active: !s.active });
+    const { error } = await rpcAuthed("admin_set_active", { p_id: s.id, p_active: !s.active });
     if (error) { alert("Couldn't update status: " + error.message); return; }
     logAudit(currentUser.name, s.active ? "STAFF_DEACTIVATED" : "STAFF_REACTIVATED", { targetId: s.id, targetName: s.name });
     await refreshStaff();
@@ -3232,7 +3432,7 @@ function StaffManagement({ staff, refreshStaff, currentUser }) {
     if (s.id === currentUser.id) { alert("You can't remove the account you're currently signed in with."); return; }
     const owners = staff.filter((x) => x.role === "owner" && x.active);
     if (s.role === "owner" && owners.length <= 1) { alert("At least one active Owner account must remain."); return; }
-    const { error } = await supabase.rpc("delete_staff", { p_id: s.id });
+    const { error } = await rpcAuthed("admin_delete_staff", { p_id: s.id });
     if (error) { alert("Couldn't remove account: " + error.message); return; }
     logAudit(currentUser.name, "STAFF_DELETED", { targetId: s.id, targetName: s.name });
     await refreshStaff();
@@ -3383,7 +3583,7 @@ function PurchaseManagement({ purchases, setPurchases, inventory, setInventory, 
     const scoped = scope === "today" ? purchases.filter((p) => p.date === today()) : purchases;
     const wb = XLSX.utils.book_new();
     const sheet = scoped.map((p) => ({
-      Date: p.date, Category: p.category || "Other", Item: p.itemName, Quantity: p.quantity, Unit: p.unit,
+      Voucher: p.voucherNo || "", Date: p.date, Category: p.category || "Other", Item: p.itemName, Quantity: p.quantity, Unit: p.unit,
       "Per Unit (Rs)": p.unitCost, "Total Cost (Rs)": p.totalCost, "Accounting": p.costType === "cogs" ? "Stock / COGS" : "Operating / Other",
       Supplier: p.supplier, "Paid Via": PAYMENT_METHODS.find((pm) => pm.id === p.paymentMethod)?.label || "Cash", Notes: p.notes,
     }));
@@ -3407,10 +3607,10 @@ function PurchaseManagement({ purchases, setPurchases, inventory, setInventory, 
       <Card style={{ padding: 0, overflow: "hidden" }}>
         {purchases.length === 0 ? <Empty text="No purchases logged yet. Log a purchase to track stock and supplier spend." /> : (
           <div style={{ overflowX: "auto" }}><table style={{ width: "100%", minWidth: 900, borderCollapse: "collapse", fontSize: 13.5 }}>
-            <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}><th style={{ padding: "10px 14px" }}>Date</th><th>Category</th><th>Item</th><th>Unit</th><th>Qty</th><th>Per Unit</th><th>Total</th><th>Type</th><th>Paid Via</th><th>Supplier</th><th></th></tr></thead>
+            <thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}><th style={{ padding: "10px 14px" }}>Date</th><th>Category</th><th>Item</th><th>Unit</th><th>Qty</th><th>Per Unit</th><th>Total</th><th>Type</th><th>Paid Via</th><th>Supplier</th><th>Voucher</th><th></th></tr></thead>
             <tbody>{purchases.slice().reverse().map((p) => (
               <tr key={p.id} style={{ borderTop: `1px solid ${T.line}` }}>
-                <td style={{ padding: "10px 14px", opacity: 0.7 }}>{p.date}</td><td>{p.category || "Other"}</td><td style={{ fontWeight: 600 }}>{p.itemName}</td><td>{p.unit}</td><td>{p.quantity}</td><td>{money(p.unitCost)}</td><td>{money(p.totalCost)}</td><td><Pill tone={p.costType === "cogs" ? "good" : "warn"}>{p.costType === "cogs" ? "Stock / COGS" : "Operating"}</Pill></td><td>{PAYMENT_METHODS.find((pm) => pm.id === p.paymentMethod)?.label || "Cash"}</td><td>{p.supplier || "—"}</td><td><button onClick={() => remove(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: T.plum, opacity: 0.5 }}><Trash2 size={13} /></button></td>
+                <td style={{ padding: "10px 14px", opacity: 0.7 }}>{p.date}</td><td>{p.category || "Other"}</td><td style={{ fontWeight: 600 }}>{p.itemName}</td><td>{p.unit}</td><td>{p.quantity}</td><td>{money(p.unitCost)}</td><td>{money(p.totalCost)}</td><td><Pill tone={p.costType === "cogs" ? "good" : "warn"}>{p.costType === "cogs" ? "Stock / COGS" : "Operating"}</Pill></td><td>{PAYMENT_METHODS.find((pm) => pm.id === p.paymentMethod)?.label || "Cash"}</td><td>{p.supplier || "—"}</td><td style={{ fontFamily: "monospace", fontSize: 12 }}>{p.voucherNo || "—"}</td><td><button onClick={() => remove(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: T.plum, opacity: 0.5 }}><Trash2 size={13} /></button></td>
               </tr>
             ))}</tbody>
           </table></div>
