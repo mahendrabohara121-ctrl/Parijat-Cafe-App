@@ -336,6 +336,141 @@ async function fetchAuditLog(limit = 500) {
   return data || [];
 }
 
+// ---------------- Unified cash & bank tracking ----------------
+// One calculation used by the Accounting dashboard and the Excel export, so every screen shows the same numbers.
+// Liquid accounts: physical cash drawer + digital wallets/bank. "credit" is NOT liquid (it is money owed to us).
+const LIQUID_ACCOUNTS = [
+  { id: "cash", label: "Physical Cash", kind: "cash" },
+  { id: "fonepay", label: "FonePay", kind: "digital" },
+  { id: "esewa", label: "eSewa", kind: "digital" },
+  { id: "khalti", label: "Khalti", kind: "digital" },
+  { id: "card", label: "Card", kind: "digital" },
+  { id: "bank", label: "Bank Account", kind: "digital" },
+];
+
+// balance = opening + received - spent + moved in - moved out
+// Only movements dated on/after an account's "as of" date count (older history is already inside the opening balance).
+function computeLiquidity({ orders = [], expenses = [], purchases = [], creditTransactions = [], cashDeposits = [], transfers = [], openings = [], onDate = null } = {}) {
+  const acc = {};
+  LIQUID_ACCOUNTS.forEach((a) => {
+    acc[a.id] = { id: a.id, label: a.label, kind: a.kind, opening: 0, asOf: null, received: 0, spent: 0, transferIn: 0, transferOut: 0, todayReceived: 0, todaySpent: 0, balance: 0 };
+  });
+  openings.forEach((o) => {
+    const a = acc[o.account];
+    if (a) { a.opening = Number(o.amount) || 0; a.asOf = o.asOf || null; }
+  });
+  const day = (v) => String(v || "").slice(0, 10);
+  const counts = (id, date) => { const a = acc[id]; return !!a && (!a.asOf || day(date) >= a.asOf); };
+  const receive = (id, amount, date) => {
+    if (!counts(id, date)) return;
+    acc[id].received += amount;
+    if (onDate && day(date) === onDate) acc[id].todayReceived += amount;
+  };
+  const spend = (id, amount, date) => {
+    if (!counts(id, date)) return;
+    acc[id].spent += amount;
+    if (onDate && day(date) === onDate) acc[id].todaySpent += amount;
+  };
+  const moveOut = (id, amount, date) => { if (counts(id, date)) acc[id].transferOut += amount; };
+  const moveIn = (id, amount, date) => { if (counts(id, date)) acc[id].transferIn += amount; };
+
+  orders.forEach((o) => { if (o.status === "paid") receive(o.paymentMethod, Number(o.total) || 0, o.paidAt || o.createdAt); });
+  creditTransactions.forEach((c) => { if (c.type === "repayment") receive(c.paymentMethod, Number(c.amount) || 0, c.date); });
+  expenses.forEach((e) => spend(e.paymentMethod || "cash", Number(e.amount) || 0, e.date));
+  purchases.forEach((p) => spend(p.paymentMethod || "cash", Number(p.totalCost) || 0, p.date));
+  // a cash deposit is a movement: drawer cash goes down, bank goes up, total liquid assets unchanged
+  cashDeposits.forEach((d) => { const amt = Number(d.amount) || 0; moveOut("cash", amt, d.date); moveIn("bank", amt, d.date); });
+  transfers.forEach((t) => {
+    if (t.status === "void" || !acc[t.from] || !acc[t.to]) return;
+    const amt = Number(t.amount) || 0;
+    moveOut(t.from, amt, t.date);
+    moveIn(t.to, amt, t.date);
+  });
+
+  const r2 = (n) => Math.round(n * 100) / 100;
+  const accounts = LIQUID_ACCOUNTS.map((a) => {
+    const x = acc[a.id];
+    x.balance = x.opening + x.received - x.spent + x.transferIn - x.transferOut;
+    ["opening", "received", "spent", "transferIn", "transferOut", "todayReceived", "todaySpent", "balance"].forEach((k) => { x[k] = r2(x[k]); });
+    return x;
+  });
+  const cash = acc.cash.balance;
+  const digital = r2(accounts.filter((a) => a.kind === "digital").reduce((s, a) => s + a.balance, 0));
+  return {
+    accounts, byId: acc, cash, digital, total: r2(cash + digital),
+    todayReceived: r2(accounts.reduce((s, a) => s + a.todayReceived, 0)),
+    todaySpent: r2(accounts.reduce((s, a) => s + a.todaySpent, 0)),
+    negatives: accounts.filter((a) => a.balance < -0.005).map((a) => a.id),
+    hasOpening: openings.length > 0,
+  };
+}
+
+/* ---------------- QR code generator (vendored) ----------------
+ * QR Code generator library — Copyright (c) Project Nayuki. (MIT License)
+ * https://www.nayuki.io/page/qr-code-generator-library
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software, to deal in it
+ * without restriction, provided the above copyright notice and this permission notice are included in all copies.
+ * The software is provided "as is", without warranty of any kind. (Compacted copy of version 1.8.0.)
+ */
+/* eslint-disable */
+var qrcodegen;(function(qrcodegen2){class QrCode{constructor(version,errorCorrectionLevel,dataCodewords,msk){if(this.version=version,this.errorCorrectionLevel=errorCorrectionLevel,this.modules=[],this.isFunction=[],version<QrCode.MIN_VERSION||version>QrCode.MAX_VERSION)throw new RangeError("Version value out of range");if(msk<-1||msk>7)throw new RangeError("Mask value out of range");this.size=version*4+17;let row=[];for(let i=0;i<this.size;i++)row.push(!1);for(let i=0;i<this.size;i++)this.modules.push(row.slice()),this.isFunction.push(row.slice());this.drawFunctionPatterns();const allCodewords=this.addEccAndInterleave(dataCodewords);if(this.drawCodewords(allCodewords),msk==-1){let minPenalty=1e9;for(let i=0;i<8;i++){this.applyMask(i),this.drawFormatBits(i);const penalty=this.getPenaltyScore();penalty<minPenalty&&(msk=i,minPenalty=penalty),this.applyMask(i)}}assert(0<=msk&&msk<=7),this.mask=msk,this.applyMask(msk),this.drawFormatBits(msk),this.isFunction=[]}static encodeText(text,ecl){const segs=qrcodegen2.QrSegment.makeSegments(text);return QrCode.encodeSegments(segs,ecl)}static encodeBinary(data,ecl){const seg=qrcodegen2.QrSegment.makeBytes(data);return QrCode.encodeSegments([seg],ecl)}static encodeSegments(segs,ecl,minVersion=1,maxVersion=40,mask=-1,boostEcl=!0){if(!(QrCode.MIN_VERSION<=minVersion&&minVersion<=maxVersion&&maxVersion<=QrCode.MAX_VERSION)||mask<-1||mask>7)throw new RangeError("Invalid value");let version,dataUsedBits;for(version=minVersion;;version++){const dataCapacityBits2=QrCode.getNumDataCodewords(version,ecl)*8,usedBits=QrSegment.getTotalBits(segs,version);if(usedBits<=dataCapacityBits2){dataUsedBits=usedBits;break}if(version>=maxVersion)throw new RangeError("Data too long")}for(const newEcl of[QrCode.Ecc.MEDIUM,QrCode.Ecc.QUARTILE,QrCode.Ecc.HIGH])boostEcl&&dataUsedBits<=QrCode.getNumDataCodewords(version,newEcl)*8&&(ecl=newEcl);let bb=[];for(const seg of segs){appendBits(seg.mode.modeBits,4,bb),appendBits(seg.numChars,seg.mode.numCharCountBits(version),bb);for(const b of seg.getData())bb.push(b)}assert(bb.length==dataUsedBits);const dataCapacityBits=QrCode.getNumDataCodewords(version,ecl)*8;assert(bb.length<=dataCapacityBits),appendBits(0,Math.min(4,dataCapacityBits-bb.length),bb),appendBits(0,(8-bb.length%8)%8,bb),assert(bb.length%8==0);for(let padByte=236;bb.length<dataCapacityBits;padByte^=253)appendBits(padByte,8,bb);let dataCodewords=[];for(;dataCodewords.length*8<bb.length;)dataCodewords.push(0);return bb.forEach((b,i)=>dataCodewords[i>>>3]|=b<<7-(i&7)),new QrCode(version,ecl,dataCodewords,mask)}getModule(x,y){return 0<=x&&x<this.size&&0<=y&&y<this.size&&this.modules[y][x]}drawFunctionPatterns(){for(let i=0;i<this.size;i++)this.setFunctionModule(6,i,i%2==0),this.setFunctionModule(i,6,i%2==0);this.drawFinderPattern(3,3),this.drawFinderPattern(this.size-4,3),this.drawFinderPattern(3,this.size-4);const alignPatPos=this.getAlignmentPatternPositions(),numAlign=alignPatPos.length;for(let i=0;i<numAlign;i++)for(let j=0;j<numAlign;j++)i==0&&j==0||i==0&&j==numAlign-1||i==numAlign-1&&j==0||this.drawAlignmentPattern(alignPatPos[i],alignPatPos[j]);this.drawFormatBits(0),this.drawVersion()}drawFormatBits(mask){const data=this.errorCorrectionLevel.formatBits<<3|mask;let rem=data;for(let i=0;i<10;i++)rem=rem<<1^(rem>>>9)*1335;const bits=(data<<10|rem)^21522;assert(bits>>>15==0);for(let i=0;i<=5;i++)this.setFunctionModule(8,i,getBit(bits,i));this.setFunctionModule(8,7,getBit(bits,6)),this.setFunctionModule(8,8,getBit(bits,7)),this.setFunctionModule(7,8,getBit(bits,8));for(let i=9;i<15;i++)this.setFunctionModule(14-i,8,getBit(bits,i));for(let i=0;i<8;i++)this.setFunctionModule(this.size-1-i,8,getBit(bits,i));for(let i=8;i<15;i++)this.setFunctionModule(8,this.size-15+i,getBit(bits,i));this.setFunctionModule(8,this.size-8,!0)}drawVersion(){if(this.version<7)return;let rem=this.version;for(let i=0;i<12;i++)rem=rem<<1^(rem>>>11)*7973;const bits=this.version<<12|rem;assert(bits>>>18==0);for(let i=0;i<18;i++){const color=getBit(bits,i),a=this.size-11+i%3,b=Math.floor(i/3);this.setFunctionModule(a,b,color),this.setFunctionModule(b,a,color)}}drawFinderPattern(x,y){for(let dy=-4;dy<=4;dy++)for(let dx=-4;dx<=4;dx++){const dist=Math.max(Math.abs(dx),Math.abs(dy)),xx=x+dx,yy=y+dy;0<=xx&&xx<this.size&&0<=yy&&yy<this.size&&this.setFunctionModule(xx,yy,dist!=2&&dist!=4)}}drawAlignmentPattern(x,y){for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++)this.setFunctionModule(x+dx,y+dy,Math.max(Math.abs(dx),Math.abs(dy))!=1)}setFunctionModule(x,y,isDark){this.modules[y][x]=isDark,this.isFunction[y][x]=!0}addEccAndInterleave(data){const ver=this.version,ecl=this.errorCorrectionLevel;if(data.length!=QrCode.getNumDataCodewords(ver,ecl))throw new RangeError("Invalid argument");const numBlocks=QrCode.NUM_ERROR_CORRECTION_BLOCKS[ecl.ordinal][ver],blockEccLen=QrCode.ECC_CODEWORDS_PER_BLOCK[ecl.ordinal][ver],rawCodewords=Math.floor(QrCode.getNumRawDataModules(ver)/8),numShortBlocks=numBlocks-rawCodewords%numBlocks,shortBlockLen=Math.floor(rawCodewords/numBlocks);let blocks=[];const rsDiv=QrCode.reedSolomonComputeDivisor(blockEccLen);for(let i=0,k=0;i<numBlocks;i++){let dat=data.slice(k,k+shortBlockLen-blockEccLen+(i<numShortBlocks?0:1));k+=dat.length;const ecc=QrCode.reedSolomonComputeRemainder(dat,rsDiv);i<numShortBlocks&&dat.push(0),blocks.push(dat.concat(ecc))}let result=[];for(let i=0;i<blocks[0].length;i++)blocks.forEach((block,j)=>{(i!=shortBlockLen-blockEccLen||j>=numShortBlocks)&&result.push(block[i])});return assert(result.length==rawCodewords),result}drawCodewords(data){if(data.length!=Math.floor(QrCode.getNumRawDataModules(this.version)/8))throw new RangeError("Invalid argument");let i=0;for(let right=this.size-1;right>=1;right-=2){right==6&&(right=5);for(let vert=0;vert<this.size;vert++)for(let j=0;j<2;j++){const x=right-j,y=(right+1&2)==0?this.size-1-vert:vert;!this.isFunction[y][x]&&i<data.length*8&&(this.modules[y][x]=getBit(data[i>>>3],7-(i&7)),i++)}}assert(i==data.length*8)}applyMask(mask){if(mask<0||mask>7)throw new RangeError("Mask value out of range");for(let y=0;y<this.size;y++)for(let x=0;x<this.size;x++){let invert;switch(mask){case 0:invert=(x+y)%2==0;break;case 1:invert=y%2==0;break;case 2:invert=x%3==0;break;case 3:invert=(x+y)%3==0;break;case 4:invert=(Math.floor(x/3)+Math.floor(y/2))%2==0;break;case 5:invert=x*y%2+x*y%3==0;break;case 6:invert=(x*y%2+x*y%3)%2==0;break;case 7:invert=((x+y)%2+x*y%3)%2==0;break;default:throw new Error("Unreachable")}!this.isFunction[y][x]&&invert&&(this.modules[y][x]=!this.modules[y][x])}}getPenaltyScore(){let result=0;for(let y=0;y<this.size;y++){let runColor=!1,runX=0,runHistory=[0,0,0,0,0,0,0];for(let x=0;x<this.size;x++)this.modules[y][x]==runColor?(runX++,runX==5?result+=QrCode.PENALTY_N1:runX>5&&result++):(this.finderPenaltyAddHistory(runX,runHistory),runColor||(result+=this.finderPenaltyCountPatterns(runHistory)*QrCode.PENALTY_N3),runColor=this.modules[y][x],runX=1);result+=this.finderPenaltyTerminateAndCount(runColor,runX,runHistory)*QrCode.PENALTY_N3}for(let x=0;x<this.size;x++){let runColor=!1,runY=0,runHistory=[0,0,0,0,0,0,0];for(let y=0;y<this.size;y++)this.modules[y][x]==runColor?(runY++,runY==5?result+=QrCode.PENALTY_N1:runY>5&&result++):(this.finderPenaltyAddHistory(runY,runHistory),runColor||(result+=this.finderPenaltyCountPatterns(runHistory)*QrCode.PENALTY_N3),runColor=this.modules[y][x],runY=1);result+=this.finderPenaltyTerminateAndCount(runColor,runY,runHistory)*QrCode.PENALTY_N3}for(let y=0;y<this.size-1;y++)for(let x=0;x<this.size-1;x++){const color=this.modules[y][x];color==this.modules[y][x+1]&&color==this.modules[y+1][x]&&color==this.modules[y+1][x+1]&&(result+=QrCode.PENALTY_N2)}let dark=0;for(const row of this.modules)dark=row.reduce((sum,color)=>sum+(color?1:0),dark);const total=this.size*this.size,k=Math.ceil(Math.abs(dark*20-total*10)/total)-1;return assert(0<=k&&k<=9),result+=k*QrCode.PENALTY_N4,assert(0<=result&&result<=2568888),result}getAlignmentPatternPositions(){if(this.version==1)return[];{const numAlign=Math.floor(this.version/7)+2,step=this.version==32?26:Math.ceil((this.version*4+4)/(numAlign*2-2))*2;let result=[6];for(let pos=this.size-7;result.length<numAlign;pos-=step)result.splice(1,0,pos);return result}}static getNumRawDataModules(ver){if(ver<QrCode.MIN_VERSION||ver>QrCode.MAX_VERSION)throw new RangeError("Version number out of range");let result=(16*ver+128)*ver+64;if(ver>=2){const numAlign=Math.floor(ver/7)+2;result-=(25*numAlign-10)*numAlign-55,ver>=7&&(result-=36)}return assert(208<=result&&result<=29648),result}static getNumDataCodewords(ver,ecl){return Math.floor(QrCode.getNumRawDataModules(ver)/8)-QrCode.ECC_CODEWORDS_PER_BLOCK[ecl.ordinal][ver]*QrCode.NUM_ERROR_CORRECTION_BLOCKS[ecl.ordinal][ver]}static reedSolomonComputeDivisor(degree){if(degree<1||degree>255)throw new RangeError("Degree out of range");let result=[];for(let i=0;i<degree-1;i++)result.push(0);result.push(1);let root=1;for(let i=0;i<degree;i++){for(let j=0;j<result.length;j++)result[j]=QrCode.reedSolomonMultiply(result[j],root),j+1<result.length&&(result[j]^=result[j+1]);root=QrCode.reedSolomonMultiply(root,2)}return result}static reedSolomonComputeRemainder(data,divisor){let result=divisor.map(_=>0);for(const b of data){const factor=b^result.shift();result.push(0),divisor.forEach((coef,i)=>result[i]^=QrCode.reedSolomonMultiply(coef,factor))}return result}static reedSolomonMultiply(x,y){if(x>>>8||y>>>8)throw new RangeError("Byte out of range");let z=0;for(let i=7;i>=0;i--)z=z<<1^(z>>>7)*285,z^=(y>>>i&1)*x;return assert(z>>>8==0),z}finderPenaltyCountPatterns(runHistory){const n=runHistory[1];assert(n<=this.size*3);const core=n>0&&runHistory[2]==n&&runHistory[3]==n*3&&runHistory[4]==n&&runHistory[5]==n;return(core&&runHistory[0]>=n*4&&runHistory[6]>=n?1:0)+(core&&runHistory[6]>=n*4&&runHistory[0]>=n?1:0)}finderPenaltyTerminateAndCount(currentRunColor,currentRunLength,runHistory){return currentRunColor&&(this.finderPenaltyAddHistory(currentRunLength,runHistory),currentRunLength=0),currentRunLength+=this.size,this.finderPenaltyAddHistory(currentRunLength,runHistory),this.finderPenaltyCountPatterns(runHistory)}finderPenaltyAddHistory(currentRunLength,runHistory){runHistory[0]==0&&(currentRunLength+=this.size),runHistory.pop(),runHistory.unshift(currentRunLength)}}QrCode.MIN_VERSION=1,QrCode.MAX_VERSION=40,QrCode.PENALTY_N1=3,QrCode.PENALTY_N2=3,QrCode.PENALTY_N3=40,QrCode.PENALTY_N4=10,QrCode.ECC_CODEWORDS_PER_BLOCK=[[-1,7,10,15,20,26,18,20,24,30,18,20,24,26,30,22,24,28,30,28,28,28,28,30,30,26,28,30,30,30,30,30,30,30,30,30,30,30,30,30,30],[-1,10,16,26,18,24,16,18,22,22,26,30,22,22,24,24,28,28,26,26,26,26,28,28,28,28,28,28,28,28,28,28,28,28,28,28,28,28,28,28,28],[-1,13,22,18,26,18,24,18,22,20,24,28,26,24,20,30,24,28,28,26,30,28,30,30,30,30,28,30,30,30,30,30,30,30,30,30,30,30,30,30,30],[-1,17,28,22,16,22,28,26,26,24,28,24,28,22,24,24,30,28,28,26,28,30,24,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30]],QrCode.NUM_ERROR_CORRECTION_BLOCKS=[[-1,1,1,1,1,1,2,2,2,2,4,4,4,4,4,6,6,6,6,7,8,8,9,9,10,12,12,12,13,14,15,16,17,18,19,19,20,21,22,24,25],[-1,1,1,1,2,2,4,4,4,5,5,5,8,9,9,10,10,11,13,14,16,17,17,18,20,21,23,25,26,28,29,31,33,35,37,38,40,43,45,47,49],[-1,1,1,2,2,4,4,6,6,8,8,8,10,12,16,12,17,16,18,21,20,23,23,25,27,29,34,34,35,38,40,43,45,48,51,53,56,59,62,65,68],[-1,1,1,2,4,4,4,5,6,8,8,11,11,16,16,18,16,19,21,25,25,25,34,30,32,35,37,40,42,45,48,51,54,57,60,63,66,70,74,77,81]],qrcodegen2.QrCode=QrCode;function appendBits(val,len,bb){if(len<0||len>31||val>>>len)throw new RangeError("Value out of range");for(let i=len-1;i>=0;i--)bb.push(val>>>i&1)}function getBit(x,i){return(x>>>i&1)!=0}function assert(cond){if(!cond)throw new Error("Assertion error")}class QrSegment{constructor(mode,numChars,bitData){if(this.mode=mode,this.numChars=numChars,this.bitData=bitData,numChars<0)throw new RangeError("Invalid argument");this.bitData=bitData.slice()}static makeBytes(data){let bb=[];for(const b of data)appendBits(b,8,bb);return new QrSegment(QrSegment.Mode.BYTE,data.length,bb)}static makeNumeric(digits){if(!QrSegment.isNumeric(digits))throw new RangeError("String contains non-numeric characters");let bb=[];for(let i=0;i<digits.length;){const n=Math.min(digits.length-i,3);appendBits(parseInt(digits.substr(i,n),10),n*3+1,bb),i+=n}return new QrSegment(QrSegment.Mode.NUMERIC,digits.length,bb)}static makeAlphanumeric(text){if(!QrSegment.isAlphanumeric(text))throw new RangeError("String contains unencodable characters in alphanumeric mode");let bb=[],i;for(i=0;i+2<=text.length;i+=2){let temp=QrSegment.ALPHANUMERIC_CHARSET.indexOf(text.charAt(i))*45;temp+=QrSegment.ALPHANUMERIC_CHARSET.indexOf(text.charAt(i+1)),appendBits(temp,11,bb)}return i<text.length&&appendBits(QrSegment.ALPHANUMERIC_CHARSET.indexOf(text.charAt(i)),6,bb),new QrSegment(QrSegment.Mode.ALPHANUMERIC,text.length,bb)}static makeSegments(text){return text==""?[]:QrSegment.isNumeric(text)?[QrSegment.makeNumeric(text)]:QrSegment.isAlphanumeric(text)?[QrSegment.makeAlphanumeric(text)]:[QrSegment.makeBytes(QrSegment.toUtf8ByteArray(text))]}static makeEci(assignVal){let bb=[];if(assignVal<0)throw new RangeError("ECI assignment value out of range");if(assignVal<128)appendBits(assignVal,8,bb);else if(assignVal<16384)appendBits(2,2,bb),appendBits(assignVal,14,bb);else if(assignVal<1e6)appendBits(6,3,bb),appendBits(assignVal,21,bb);else throw new RangeError("ECI assignment value out of range");return new QrSegment(QrSegment.Mode.ECI,0,bb)}static isNumeric(text){return QrSegment.NUMERIC_REGEX.test(text)}static isAlphanumeric(text){return QrSegment.ALPHANUMERIC_REGEX.test(text)}getData(){return this.bitData.slice()}static getTotalBits(segs,version){let result=0;for(const seg of segs){const ccbits=seg.mode.numCharCountBits(version);if(seg.numChars>=1<<ccbits)return 1/0;result+=4+ccbits+seg.bitData.length}return result}static toUtf8ByteArray(str){str=encodeURI(str);let result=[];for(let i=0;i<str.length;i++)str.charAt(i)!="%"?result.push(str.charCodeAt(i)):(result.push(parseInt(str.substr(i+1,2),16)),i+=2);return result}}QrSegment.NUMERIC_REGEX=/^[0-9]*$/,QrSegment.ALPHANUMERIC_REGEX=/^[A-Z0-9 $%*+.\/:-]*$/,QrSegment.ALPHANUMERIC_CHARSET="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:",qrcodegen2.QrSegment=QrSegment})(qrcodegen||(qrcodegen={})),(function(qrcodegen2){var QrCode;(function(QrCode2){class Ecc{constructor(ordinal,formatBits){this.ordinal=ordinal,this.formatBits=formatBits}}Ecc.LOW=new Ecc(0,1),Ecc.MEDIUM=new Ecc(1,0),Ecc.QUARTILE=new Ecc(2,3),Ecc.HIGH=new Ecc(3,2),QrCode2.Ecc=Ecc})(QrCode=qrcodegen2.QrCode||(qrcodegen2.QrCode={}))})(qrcodegen||(qrcodegen={})),(function(qrcodegen2){var QrSegment;(function(QrSegment2){class Mode{constructor(modeBits,numBitsCharCount){this.modeBits=modeBits,this.numBitsCharCount=numBitsCharCount}numCharCountBits(ver){return this.numBitsCharCount[Math.floor((ver+7)/17)]}}Mode.NUMERIC=new Mode(1,[10,12,14]),Mode.ALPHANUMERIC=new Mode(2,[9,11,13]),Mode.BYTE=new Mode(4,[8,16,16]),Mode.KANJI=new Mode(8,[8,10,12]),Mode.ECI=new Mode(7,[0,0,0]),QrSegment2.Mode=Mode})(QrSegment=qrcodegen2.QrSegment||(qrcodegen2.QrSegment={}))})(qrcodegen||(qrcodegen={}));
+/* eslint-enable */
+
+// ---------------- QR menu + cash tender helpers ----------------
+function escHtml(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Draws a QR code as an SVG string (crisp when printed, no image files needed).
+function qrSvg(text, px = 220) {
+  try {
+    const qr = qrcodegen.QrCode.encodeText(String(text), qrcodegen.QrCode.Ecc.MEDIUM);
+    const border = 4; // the "quiet zone" scanners need around the code
+    const n = qr.size;
+    let d = "";
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        if (qr.getModule(x, y)) d += `M${x + border},${y + border}h1v1h-1z`;
+      }
+    }
+    const size = n + border * 2;
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${px}" height="${px}" shape-rendering="crispEdges"><rect width="${size}" height="${size}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+  } catch (e) {
+    return `<div style="width:${px}px;height:${px}px;display:flex;align-items:center;justify-content:center;font:12px sans-serif;color:#b91c1c;text-align:center">QR code could not be created (address too long?)</div>`;
+  }
+}
+
+// Cash tender: how much to hand back, or how much is still missing. Works in whole paisa to avoid 0.1 + 0.2 style errors.
+function computeChange(total, received) {
+  const t = Math.round((Number(total) || 0) * 100);
+  const r = Math.round((Number(received) || 0) * 100);
+  const has = received !== "" && received != null && Number.isFinite(Number(received)) && Number(received) > 0;
+  if (!has) return { has: false, enough: false, change: 0, short: 0 };
+  if (r >= t) return { has: true, enough: true, change: (r - t) / 100, short: 0 };
+  return { has: true, enough: false, change: 0, short: (t - r) / 100 };
+}
+
+// One-tap amounts that cashiers actually receive: exact, then rounded up to 50 / 100 / 500 / 1000.
+function quickTenderAmounts(total) {
+  const t = Number(total) || 0;
+  const up = (step) => Math.ceil(t / step) * step;
+  return Array.from(new Set([t, up(50), up(100), up(500), up(1000)].filter((n) => n >= t && n > 0))).slice(0, 5);
+}
+
+// read every row of a (small, read-only) table, page by page
+async function fetchAllRows(table, orderCol = "id") {
+  const PAGE = 1000;
+  const all = [];
+  for (let from = 0; ; ) {
+    const { data, error } = await supabase.from(table).select("*").order(orderCol, { ascending: true }).range(from, from + PAGE - 1);
+    if (error) throw new Error(error.message);
+    if (!data.length) break;
+    all.push(...data);
+    from += data.length;
+  }
+  return all;
+}
+
 // vouchers (the voucher_register table is read-only for the browser; the server writes it)
 async function fetchDayVouchers(dateKey) {
   const { data, error } = await supabase.from("voucher_register").select("*").eq("vdate", dateKey).eq("status", "active").order("created_at", { ascending: true });
@@ -874,7 +1009,7 @@ function BusinessDayControl({
 }
 
 /* ================= MAIN APP ================= */
-export default function App() {
+function App() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [active, setActive] = useState("overview");
@@ -1438,7 +1573,7 @@ export default function App() {
           {active === "menu" && <MenuManagement menu={menu} setMenu={persist.menu} inventory={inventory} />}
           {active === "crm" && <CRM customers={customers} setCustomers={persist.customers} orders={orders} />}
           {active === "sales" && <SalesReport orders={orders} menu={menu} />}
-          {active === "qr" && <QRMenu menu={menu} />}
+          {active === "qr" && <QRMenu tables={tables} />}
           {active === "online" && <OnlineOrder menu={menu} orders={orders} setOrders={persist.orders} businessDay={currentBusinessDay} />}
           {active === "loyalty" && <Loyalty customers={customers} setCustomers={persist.customers} />}
           {active === "refer" && <ReferEarn customers={customers} referrals={referrals} setReferrals={persist.referrals} setCustomers={persist.customers} />}
@@ -1685,14 +1820,18 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
   const settlePayment = (order, method, customerOverride) => {
     if (businessDay.status !== "open") { alert("Business Day is closed. Reopen it before taking payment."); return; }
     if (method === "credit") { setCreditStep(order); setCreditCustomerId(""); setCreditNewName(""); setCreditNewPhone(""); setCreditMode("existing"); return; } // needs a customer first
+    if (method === "cash") { setTender({ amount: "" }); return; } // ask how much cash the guest handed over
     finalizeSettlement(order, method, customerOverride);
   };
 
   const [paying, setPaying] = useState(false);
+  const [tender, setTender] = useState(null);       // null = choosing how the guest pays; { amount } = the cash-received screen
+  const [changeDue, setChangeDue] = useState(null); // shown after a cash payment so the change is never forgotten
+  useEffect(() => { setTender(null); }, [payOrder]);
 
   // Payment is ONE atomic server call: stock, ledger, COGS, table, loyalty, credit-book.
   // The server is idempotent, so a double-tap can't deduct ingredients twice.
-  const finalizeSettlement = async (order, method, customerNameOverride, customerId = null) => {
+  const finalizeSettlement = async (order, method, customerNameOverride, customerId = null, extraAudit = null) => {
     if (paying) return false;
     const freshOrder = orders.find((o) => o.id === order.id) || order;
     if (freshOrder.status === "paid") { setPayOrder(null); return true; }
@@ -1705,7 +1844,7 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
         p_customer_id: customerId,
       });
       if (error) throw error;
-      logAudit(currentUser?.name, "ORDER_PAID", { orderId: freshOrder.id, total: freshOrder.total, paymentMethod: method, cogs: data?.cogs_total, inventoryLines: data?.movement_count });
+      logAudit(currentUser?.name, "ORDER_PAID", { orderId: freshOrder.id, total: freshOrder.total, paymentMethod: method, cogs: data?.cogs_total, inventoryLines: data?.movement_count, ...(extraAudit || {}) });
       await refreshData(freshOrder.id);
       setPayOrder(null);
       const warnings = [];
@@ -1720,6 +1859,18 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
     } finally {
       setPaying(false);
     }
+  };
+
+  // Cash: record how much the guest gave and how much change goes back (kept in the audit log; sales/cash totals stay the bill amount)
+  const confirmCashPayment = async () => {
+    if (!payOrder || paying) return;
+    const order = orders.find((o) => o.id === payOrder.id) || payOrder;
+    const total = Number(order.total) || 0;
+    const calc = computeChange(total, tender?.amount);
+    if (!calc.enough) return;
+    const received = Number(tender.amount);
+    const ok = await finalizeSettlement(order, "cash", undefined, null, { tendered: received, change: calc.change });
+    if (ok && calc.change > 0) setChangeDue({ table: order.tableName, total, received, change: calc.change });
   };
 
   const confirmCreditSale = async () => {
@@ -1931,24 +2082,87 @@ function Orders({ menu, tables, orders, setOrders, setTables, customers, setCust
         </Modal>
       )}
 
-      {payOrder && (
-        <Modal title={`Settle ${payOrder.tableName} · ${money(payOrder.total)}`} onClose={() => setPayOrder(null)} width={380}>
-          <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 14 }}>Choose how the guest paid to close out this order.</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            {PAYMENT_METHODS.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => settlePayment(payOrder, p.id)}
-                style={{
-                  padding: "14px 10px", borderRadius: 8, border: `1px solid ${T.line}`, background: "#fff",
-                  cursor: "pointer", fontSize: 13.5, fontWeight: 600, color: T.dusk, textAlign: "center",
-                }}
-                onMouseEnter={(e) => (e.currentTarget.style.borderColor = T.gold)}
-                onMouseLeave={(e) => (e.currentTarget.style.borderColor = T.line)}
-              >
-                {p.label}
-              </button>
-            ))}
+      {payOrder && (() => {
+        const live = orders.find((o) => o.id === payOrder.id) || payOrder;
+        const total = Number(live.total) || 0;
+        const calc = computeChange(total, tender?.amount);
+        const quick = quickTenderAmounts(total);
+        return (
+          <Modal title={tender ? `Cash payment · ${live.tableName}` : `Settle ${live.tableName} · ${money(total)}`} onClose={() => { setPayOrder(null); setTender(null); }} width={380}>
+            {!tender ? (
+              <>
+                <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 14 }}>Choose how the guest paid to close out this order.</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  {PAYMENT_METHODS.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => settlePayment(payOrder, p.id)}
+                      style={{
+                        padding: "14px 10px", borderRadius: 8, border: `1px solid ${T.line}`, background: "#fff",
+                        cursor: "pointer", fontSize: 13.5, fontWeight: 600, color: T.dusk, textAlign: "center",
+                      }}
+                      onMouseEnter={(e) => (e.currentTarget.style.borderColor = T.gold)}
+                      onMouseLeave={(e) => (e.currentTarget.style.borderColor = T.line)}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ textAlign: "center", marginBottom: 12 }}>
+                  <div style={{ fontSize: 12, color: T.plum }}>Bill total</div>
+                  <div style={{ fontSize: 30, fontWeight: 800, color: T.dusk }}>{money(total)}</div>
+                </div>
+                <Field label="Cash received from the guest (Rs)">
+                  <input
+                    autoFocus type="number" inputMode="decimal" min="0"
+                    style={{ ...inputStyle, fontSize: 22, textAlign: "center", fontWeight: 700 }}
+                    value={tender.amount} placeholder="0"
+                    onChange={(e) => setTender({ amount: e.target.value })}
+                    onKeyDown={(e) => { if (e.key === "Enter" && calc.enough && !paying) confirmCashPayment(); }}
+                  />
+                </Field>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+                  {quick.map((n, i) => (
+                    <button key={n} onClick={() => setTender({ amount: String(n) })} style={{ padding: "8px 12px", borderRadius: 8, border: `1px solid ${T.line}`, background: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 600, color: T.dusk }}>
+                      {i === 0 ? `Exact ${money(n)}` : money(n)}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ borderRadius: 10, padding: 14, textAlign: "center", marginBottom: 14, background: calc.enough ? "#ECFDF5" : calc.has ? "#FEE2E2" : T.cream, border: `1px solid ${calc.enough ? "#BBF7D0" : calc.has ? "#FECACA" : T.line}` }}>
+                  {!calc.has && <div style={{ fontSize: 13, color: T.plum }}>Enter the amount the guest gave you</div>}
+                  {calc.has && calc.enough && (
+                    <>
+                      <div style={{ fontSize: 12.5, color: "#166534" }}>{calc.change > 0 ? "Return change to the guest" : "Exact amount, no change to return"}</div>
+                      <div style={{ fontSize: 30, fontWeight: 800, color: "#166534" }}>{money(calc.change)}</div>
+                    </>
+                  )}
+                  {calc.has && !calc.enough && (
+                    <>
+                      <div style={{ fontSize: 12.5, color: "#991B1B" }}>Not enough, the guest still owes</div>
+                      <div style={{ fontSize: 30, fontWeight: 800, color: "#991B1B" }}>{money(calc.short)}</div>
+                    </>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <Btn variant="ghost" onClick={() => setTender(null)}>Back</Btn>
+                  <Btn variant="primary" disabled={!calc.enough || paying} onClick={confirmCashPayment} style={{ flex: 1, justifyContent: "center" }}>{paying ? "Saving…" : "Confirm Payment"}</Btn>
+                </div>
+              </>
+            )}
+          </Modal>
+        );
+      })()}
+
+      {changeDue && (
+        <Modal title="Payment received" onClose={() => setChangeDue(null)} width={360}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 13, color: T.plum }}>{changeDue.table} · Bill {money(changeDue.total)} · Received {money(changeDue.received)}</div>
+            <div style={{ fontSize: 13, color: T.plum, marginTop: 14 }}>Give back to the guest</div>
+            <div style={{ fontSize: 44, fontWeight: 800, color: "#166534", margin: "4px 0 18px" }}>{money(changeDue.change)}</div>
+            <Btn variant="primary" onClick={() => setChangeDue(null)} style={{ width: "100%", justifyContent: "center" }}>Done</Btn>
           </div>
         </Modal>
       )}
@@ -2343,6 +2557,25 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
   const [pnlFrom, setPnlFrom] = useState(businessDay?.date || today());
   const [pnlTo, setPnlTo] = useState(businessDay?.date || today());
 
+  // ---- unified cash & bank tracking: opening balances + money movements come from the database ----
+  const [openingRows, setOpeningRows] = useState([]);
+  const [transferRows, setTransferRows] = useState([]);
+  const [liqSetupError, setLiqSetupError] = useState("");
+  const loadLiquidity = async () => {
+    try {
+      const [ob, tr] = await Promise.all([fetchAllRows("opening_balances", "account"), fetchAllRows("account_transfers", "id")]);
+      setOpeningRows(ob.map((r) => ({ account: r.account, amount: Number(r.amount), asOf: r.as_of })));
+      setTransferRows(tr.map((r) => ({ id: r.id, from: r.from_account, to: r.to_account, amount: Number(r.amount), date: r.tdate, notes: r.notes, voucherNo: r.voucher_no, status: r.status, createdBy: r.created_by })));
+      setLiqSetupError("");
+    } catch (e) {
+      setLiqSetupError(e.message || "couldn't load");
+    }
+  };
+  useEffect(() => { loadLiquidity(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const liquidity = computeLiquidity({ orders, expenses, purchases, creditTransactions, cashDeposits, transfers: transferRows, openings: openingRows, onDate: businessDay?.date || today() });
+  const canMoveMoney = ["owner", "manager"].includes(currentUser?.role);
+  const canSetOpening = currentUser?.role === "owner";
+
   const revenue = orders.filter((o) => o.status === "paid").reduce((s, o) => s + Number(o.total || 0), 0);
   const totalExpense = expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
   const totalPurchaseSpend = purchases.reduce((s, p) => s + Number(p.totalCost || 0), 0);
@@ -2354,7 +2587,6 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
   const actualCogsAll = recipeCogsAll + legacyCogsForUntrackedAll;
   const operatingPurchasesAll = purchases.filter((p) => (p.costType || (p.itemId ? "cogs" : "operating")) !== "cogs").reduce((s, p) => s + Number(p.totalCost || 0), 0);
   const netProfit = revenue - actualCogsAll - totalExpense - operatingPurchasesAll;
-  const totalDeposited = cashDeposits.reduce((s, d) => s + Number(d.amount || 0), 0);
 
   const addExpense = () => {
     if (businessDay.status !== "open") { alert("Business Day is closed. Open it before adding an expense."); return; }
@@ -2377,17 +2609,8 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
   const creditRepayments = (creditTransactions || []).filter((c) => c.type === "repayment");
   const creditOutstanding = (creditTransactions || []).reduce((s, c) => s + (c.type === "sale" ? Number(c.amount || 0) : -Number(c.amount || 0)), 0);
 
-  const methodBreakdown = PAYMENT_METHODS.filter((p) => p.id !== "credit").map((p) => {
-    const moneyInFromOrders = paidOrders.filter((o) => o.paymentMethod === p.id).reduce((s, o) => s + Number(o.total || 0), 0);
-    const moneyInFromRepayments = creditRepayments.filter((c) => c.paymentMethod === p.id).reduce((s, c) => s + Number(c.amount || 0), 0);
-    const moneyIn = moneyInFromOrders + moneyInFromRepayments;
-    const expenseOut = expenses.filter((e) => e.paymentMethod === p.id).reduce((s, e) => s + Number(e.amount || 0), 0);
-    const purchaseOut = purchases.filter((pu) => pu.paymentMethod === p.id).reduce((s, pu) => s + Number(pu.totalCost || 0), 0);
-    return { ...p, in: moneyIn, out: expenseOut + purchaseOut, net: moneyIn - expenseOut - purchaseOut };
-  }).filter((p) => p.in > 0 || p.out > 0);
-
-  const cashBalance = (methodBreakdown.find((p) => p.id === "cash")?.net || 0) - totalDeposited;
-  const bankBalance = methodBreakdown.filter((p) => p.id !== "cash").reduce((s, p) => s + p.net, 0) + totalDeposited;
+  const cashBalance = liquidity.cash;
+  const bankBalance = liquidity.digital;
 
   const exportToExcel = (scope) => {
     const scoped = (arr, dateField = "date") => scope === "today" ? arr.filter((r) => (r[dateField] || "").slice(0, 10) === today()) : arr;
@@ -2422,7 +2645,7 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
       { Metric: "Bank Movement — In (Rs)", Value: bankIn }, { Metric: "Bank Movement — Out (Rs)", Value: bankOut },
       { Metric: "Credit Outstanding right now (Rs)", Value: creditOutstanding },
     ];
-    if (scope === "all") { summarySheet.push({ Metric: "Cash in Hand right now (Rs)", Value: cashBalance }); summarySheet.push({ Metric: "Bank Balance right now (Rs)", Value: bankBalance }); }
+    if (scope === "all") { summarySheet.push({ Metric: "Cash in Hand right now (Rs)", Value: cashBalance }); summarySheet.push({ Metric: "Bank Balance right now (Rs)", Value: bankBalance }); summarySheet.push({ Metric: "Total Liquid Assets right now (Rs)", Value: liquidity.total }); }
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summarySheet), "Summary");
     const expenseSheet = scopedExpenses.map((e) => ({ Voucher: e.voucherNo || "", Date: e.date, Category: e.category, Description: e.description, "Amount (Rs)": e.amount, "Paid Via": PAYMENT_METHODS.find((p) => p.id === e.paymentMethod)?.label || e.paymentMethod }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(expenseSheet), "Expenses");
@@ -2479,15 +2702,7 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
         <Card style={cardStyle} onClick={() => openDetail("credit")}><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Credit Outstanding</div><div style={{ fontSize: 22, fontWeight: 700, color: creditOutstanding > 0 ? T.red : T.dusk }}>{money(creditOutstanding)}</div><div style={{ fontSize: 11, color: T.gold, marginTop: 5 }}>Click to view credit →</div></Card>
       </div>
 
-      <Card style={{ padding: 18, marginBottom: 20 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4, flexWrap: "wrap", gap: 10 }}><div><h3 style={{ fontSize: 15, color: T.dusk, marginBottom: 4 }}>Cash &amp; Bank Reconciliation</h3><div style={{ fontSize: 12, color: T.plum, opacity: 0.7 }}>Cash sales minus cash spending vs. everything paid through card/FonePay/eSewa/Khalti/bank transfer.</div></div><Btn variant="gold" onClick={() => setDepositModal(true)}><Plus size={15} /> Log Cash Deposit</Btn></div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 14, marginBottom: 18, marginTop: 14 }}>
-          <div style={{ background: T.cream, borderRadius: 10, padding: 14 }}><div style={{ fontSize: 11, color: T.plum }}>Cash in Hand</div><div style={{ fontSize: 20, fontWeight: 700, color: T.dusk }}>{money(cashBalance)}</div></div>
-          <div style={{ background: T.cream, borderRadius: 10, padding: 14 }}><div style={{ fontSize: 11, color: T.plum }}>Bank Balance</div><div style={{ fontSize: 20, fontWeight: 700, color: T.dusk }}>{money(bankBalance)}</div></div>
-          <div style={{ background: T.cream, borderRadius: 10, padding: 14 }}><div style={{ fontSize: 11, color: T.plum }}>Total Deposited</div><div style={{ fontSize: 20, fontWeight: 700, color: T.dusk }}>{money(totalDeposited)}</div></div>
-        </div>
-        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}><thead><tr style={{ background: T.cream, textAlign: "left" }}><th style={{ padding: 9 }}>Method</th><th style={{ padding: 9, textAlign: "right" }}>In</th><th style={{ padding: 9, textAlign: "right" }}>Out</th><th style={{ padding: 9, textAlign: "right" }}>Net</th></tr></thead><tbody>{methodBreakdown.map((p) => <tr key={p.id} style={{ borderTop: `1px solid ${T.line}` }}><td style={{ padding: 9 }}>{p.label}</td><td style={{ padding: 9, textAlign: "right", color: "#15803D" }}>{money(p.in)}</td><td style={{ padding: 9, textAlign: "right", color: T.red }}>{money(p.out)}</td><td style={{ padding: 9, textAlign: "right", fontWeight: 700 }}>{money(p.net)}</td></tr>)}</tbody></table></div>
-      </Card>
+      <LiquidityPanel liquidity={liquidity} transfers={transferRows} openingRows={openingRows} canMove={canMoveMoney} canSetOpening={canSetOpening} onDeposit={() => setDepositModal(true)} reload={loadLiquidity} businessDate={businessDay?.date || today()} setupError={liqSetupError} />
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}><h3 style={{ fontFamily: "inherit", fontSize: 16, color: T.dusk }}>Expenses</h3><Btn variant="primary" onClick={() => setModal(true)}><Plus size={15} /> Add Expense</Btn></div>
       <Card style={{ padding: 0, overflow: "hidden" }}>{expenses.length === 0 ? <Empty text="No expenses recorded yet." /> : <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}><thead><tr style={{ background: "#F6F0E1", textAlign: "left" }}><th style={{ padding: "10px 14px" }}>Category</th><th>Description</th><th>Amount</th><th>Paid Via</th><th>Date</th><th>Voucher</th><th></th></tr></thead><tbody>{expenses.slice().reverse().map((e) => <tr key={e.id} style={{ borderTop: `1px solid ${T.line}` }}><td style={{ padding: "10px 14px" }}><Pill>{e.category}</Pill></td><td>{e.description || "—"}</td><td>{money(e.amount)}</td><td>{PAYMENT_METHODS.find((p) => p.id === e.paymentMethod)?.label || "Cash"}</td><td style={{ opacity: 0.7 }}>{e.date}</td><td style={{ fontFamily: "monospace", fontSize: 12 }}>{e.voucherNo || "—"}</td><td><button onClick={() => removeExpense(e.id)} style={{ background: "none", border: "none", cursor: "pointer", color: T.plum, opacity: 0.5 }}><Trash2 size={13} /></button></td></tr>)}</tbody></table>}</Card>
@@ -2499,6 +2714,217 @@ function Accounting({ expenses, setExpenses, orders, purchases, cashDeposits, se
 
       {pnlModal && <Modal title="Profit & Loss Report" onClose={() => setPnlModal(false)} width={760}><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}><Field label="From Date"><input type="date" style={inputStyle} value={pnlFrom} onChange={(e) => setPnlFrom(e.target.value)} /></Field><Field label="To Date"><input type="date" style={inputStyle} value={pnlTo} onChange={(e) => setPnlTo(e.target.value)} /></Field></div>{(() => { const r = makePnl(); return <><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}><Card style={{ padding: 14 }}><div style={{ color: T.plum, fontSize: 11 }}>INCOME</div><div style={{ fontSize: 21, fontWeight: 700, color: "#15803D" }}>{money(r.income)}</div><div style={{ fontSize: 12, marginTop: 4 }}>Food &amp; Beverage Sales</div></Card><Card style={{ padding: 14 }}><div style={{ color: T.plum, fontSize: 11 }}>COGS / PURCHASES</div><div style={{ fontSize: 21, fontWeight: 700, color: T.red }}>{money(r.cogs)}</div><div style={{ fontSize: 12, marginTop: 4 }}>{r.hasRecipeCogs ? "Ingredients actually consumed from paid orders" : "Legacy direct stock purchase cost — add recipes for actual COGS"}</div></Card></div><div style={{ marginTop: 14, padding: 14, background: T.cream, borderRadius: 10 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span>Gross Profit</span><strong>{money(r.gross)}</strong></div><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span>Operating Expenses</span><strong style={{ color: T.red }}>{money(r.operating)}</strong></div><div style={{ borderTop: `2px solid ${T.dusk}`, paddingTop: 10, display: "flex", justifyContent: "space-between", fontSize: 17 }}><strong>NET {r.net >= 0 ? "PROFIT" : "LOSS"}</strong><strong style={{ color: r.net >= 0 ? "#15803D" : T.red }}>{money(Math.abs(r.net))}</strong></div></div><div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}><Btn variant="ghost" onClick={printPnl}><Printer size={15} /> Print / Save PDF</Btn><Btn variant="primary" onClick={() => setPnlModal(false)}>Close</Btn></div></> })()}</Modal>}
     </div>
+  );
+}
+
+/* ================= CASH & BANK (unified liquidity) ================= */
+function LiquidityPanel({ liquidity, transfers, openingRows, canMove, canSetOpening, onDeposit, reload, businessDate, setupError }) {
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [openingOpen, setOpeningOpen] = useState(false);
+  const [mv, setMv] = useState({ from: "cash", to: "bank", amount: "", date: businessDate, notes: "" });
+  const [op, setOp] = useState({ asOf: today(), amounts: {} });
+  const [busy, setBusy] = useState(false);
+
+  const label = (id) => LIQUID_ACCOUNTS.find((a) => a.id === id)?.label || id;
+  const openMove = () => { setMv({ from: "cash", to: "bank", amount: "", date: businessDate, notes: "" }); setMoveOpen(true); };
+  const openOpening = () => {
+    const amounts = {};
+    LIQUID_ACCOUNTS.forEach((a) => { const row = openingRows.find((r) => r.account === a.id); amounts[a.id] = row ? String(row.amount) : ""; });
+    setOp({ asOf: openingRows[0]?.asOf || today(), amounts });
+    setOpeningOpen(true);
+  };
+
+  const submitMove = async () => {
+    const amount = Number(mv.amount);
+    if (mv.from === mv.to) { alert("Choose two different accounts."); return; }
+    if (!Number.isFinite(amount) || amount <= 0) { alert("Enter an amount greater than zero."); return; }
+    const have = liquidity.byId[mv.from].balance;
+    if (amount > have && !window.confirm(`${label(mv.from)} only shows ${money(have)}. Move ${money(amount)} anyway? This will make it negative — check the opening balances.`)) return;
+    setBusy(true);
+    const { data, error } = await rpcAuthed("move_money", { p_from: mv.from, p_to: mv.to, p_amount: amount, p_date: mv.date || null, p_notes: mv.notes || null });
+    setBusy(false);
+    if (error) { alert("Couldn't move the money: " + error.message); return; }
+    logAudit(null, "MONEY_MOVED", { from: mv.from, to: mv.to, amount, voucher: data?.voucher_no || null });
+    setMoveOpen(false);
+    await reload();
+  };
+
+  const voidMove = async (t) => {
+    if (!window.confirm(`Cancel this movement of ${money(t.amount)} from ${label(t.from)} to ${label(t.to)}? The balances go back as if it never happened.`)) return;
+    const { error } = await rpcAuthed("void_transfer", { p_id: t.id });
+    if (error) { alert("Couldn't cancel it: " + error.message); return; }
+    logAudit(null, "MONEY_MOVE_VOIDED", { id: t.id, voucher: t.voucherNo, amount: t.amount });
+    await reload();
+  };
+
+  const submitOpening = async () => {
+    const amounts = {};
+    for (const a of LIQUID_ACCOUNTS) {
+      const n = Number(op.amounts[a.id] || 0);
+      if (!Number.isFinite(n) || n < 0) { alert(`Enter a valid amount for ${a.label}.`); return; }
+      amounts[a.id] = n;
+    }
+    if (!op.asOf) { alert("Choose the date these balances are true from."); return; }
+    if (!window.confirm(`Set these as the real balances from ${op.asOf}? Everything recorded before that date will stop counting toward the balances.`)) return;
+    setBusy(true);
+    const { error } = await rpcAuthed("set_opening_balances", { p_as_of: op.asOf, p_amounts: amounts });
+    setBusy(false);
+    if (error) { alert("Couldn't save the opening balances: " + error.message); return; }
+    logAudit(null, "OPENING_BALANCES_SET", { asOf: op.asOf, ...amounts });
+    setOpeningOpen(false);
+    await reload();
+  };
+
+  const recent = transfers.slice().sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 8);
+  const todayRows = liquidity.accounts.filter((a) => a.todayReceived > 0);
+
+  return (
+    <Card style={{ padding: 18, marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+        <div>
+          <h3 style={{ fontSize: 15, color: T.dusk, marginBottom: 4 }}>Cash &amp; Bank</h3>
+          <div style={{ fontSize: 12, color: T.plum, opacity: 0.75 }}>One view of all your money: the cash drawer plus FonePay, eSewa, Khalti, card and bank.</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {canMove && <Btn variant="primary" onClick={openMove}>⇄ Move Money</Btn>}
+          <Btn variant="gold" onClick={onDeposit}><Plus size={15} /> Log Cash Deposit</Btn>
+          {canSetOpening && <Btn variant="ghost" onClick={openOpening}>Opening Balances</Btn>}
+          <Btn variant="ghost" onClick={reload}>Refresh</Btn>
+        </div>
+      </div>
+
+      {setupError && (
+        <div style={{ background: "#FEF3C7", color: "#92400E", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 12 }}>
+          Opening balances and money movements aren't available yet (the V5 database step has not been run on this project). The figures below count recorded entries only. <span style={{ opacity: 0.8 }}>({setupError})</span>
+        </div>
+      )}
+      {!setupError && !liquidity.hasOpening && (
+        <div style={{ background: "#EFF6FF", color: "#1E40AF", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 12 }}>
+          Opening balances are not set, so these figures only count what was recorded in the POS. {canSetOpening ? "Press “Opening Balances” and enter what is really in the drawer, wallets and bank." : "Ask the owner to set them so they match the real cash and bank."}
+        </div>
+      )}
+      {liquidity.negatives.length > 0 && (
+        <div style={{ background: "#FEE2E2", color: "#991B1B", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 12 }}>
+          Negative balance on {liquidity.negatives.map(label).join(", ")}. Check the opening balances or look for a missing entry.
+        </div>
+      )}
+
+      <div style={{ background: T.cream, border: `1px solid ${T.line}`, borderRadius: 12, padding: 16, textAlign: "center", marginBottom: 12 }}>
+        <div style={{ fontSize: 11.5, color: T.plum, textTransform: "uppercase", letterSpacing: 0.6 }}>Total Liquid Assets</div>
+        <div style={{ fontSize: 32, fontWeight: 800, color: T.dusk }}>{money(liquidity.total)}</div>
+        <div style={{ fontSize: 12, color: T.plum, opacity: 0.75 }}>(Cash + Bank / Digital)</div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(210px,1fr))", gap: 12, marginBottom: 14 }}>
+        <div style={{ background: "#ECFDF5", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14 }}>
+          <div style={{ fontSize: 12, color: "#166534" }}>Physical Cash</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: "#166534" }}>{money(liquidity.cash)}</div>
+        </div>
+        <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 10, padding: 14 }}>
+          <div style={{ fontSize: 12, color: "#1E40AF" }}>Bank / Digital</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: "#1E40AF" }}>{money(liquidity.digital)}</div>
+        </div>
+      </div>
+
+      {todayRows.length > 0 && (
+        <div style={{ border: `1px solid ${T.line}`, borderRadius: 10, marginBottom: 14, overflow: "hidden" }}>
+          <div style={{ background: "#F3F4F6", padding: "8px 12px", fontSize: 12, fontWeight: 700, color: T.dusk }}>Received on {businessDate}</div>
+          {todayRows.map((a) => (
+            <div key={a.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 12px", fontSize: 13, borderTop: `1px solid ${T.line}` }}>
+              <span>{a.label}</span><strong>{money(a.todayReceived)}</strong>
+            </div>
+          ))}
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 12px", fontSize: 13, borderTop: `2px solid ${T.dusk}` }}>
+            <strong>Total received</strong><strong>{money(liquidity.todayReceived)}</strong>
+          </div>
+        </div>
+      )}
+
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", minWidth: 640, borderCollapse: "collapse", fontSize: 13 }}>
+          <thead><tr style={{ background: T.cream, textAlign: "right" }}>
+            <th style={{ padding: 9, textAlign: "left" }}>Account</th><th style={{ padding: 9 }}>Opening</th><th style={{ padding: 9 }}>Received</th><th style={{ padding: 9 }}>Spent</th><th style={{ padding: 9 }}>Moved in</th><th style={{ padding: 9 }}>Moved out</th><th style={{ padding: 9 }}>Balance</th>
+          </tr></thead>
+          <tbody>
+            {liquidity.accounts.map((a) => (
+              <tr key={a.id} style={{ borderTop: `1px solid ${T.line}`, textAlign: "right" }}>
+                <td style={{ padding: 9, textAlign: "left", fontWeight: 600 }}>{a.label}</td>
+                <td style={{ padding: 9 }}>{money(a.opening)}</td>
+                <td style={{ padding: 9, color: "#15803D" }}>{money(a.received)}</td>
+                <td style={{ padding: 9, color: T.red }}>{money(a.spent)}</td>
+                <td style={{ padding: 9 }}>{money(a.transferIn)}</td>
+                <td style={{ padding: 9 }}>{money(a.transferOut)}</td>
+                <td style={{ padding: 9, fontWeight: 700, color: a.balance < 0 ? T.red : T.dusk }}>{money(a.balance)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {recent.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: T.dusk, marginBottom: 6 }}>Recent money movements</div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: 560, borderCollapse: "collapse", fontSize: 12.5 }}>
+              <tbody>
+                {recent.map((t) => (
+                  <tr key={t.id} style={{ borderTop: `1px solid ${T.line}`, opacity: t.status === "void" ? 0.5 : 1 }}>
+                    <td style={{ padding: "7px 4px" }}>{t.date}</td>
+                    <td style={{ fontFamily: "monospace" }}>{t.voucherNo || "—"}</td>
+                    <td>{label(t.from)} → {label(t.to)}</td>
+                    <td style={{ fontWeight: 600 }}>{money(t.amount)}</td>
+                    <td style={{ color: T.plum }}>{t.notes || ""}</td>
+                    <td style={{ textAlign: "right" }}>
+                      {t.status === "void" ? <Pill tone="bad">Cancelled</Pill> : canMove ? <button onClick={() => voidMove(t)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.red }}>Cancel</button> : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {moveOpen && (
+        <Modal title="Move Money Between Accounts" onClose={() => setMoveOpen(false)} width={440}>
+          <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 12 }}>
+            Money leaves one account and arrives in the other, so Total Liquid Assets stays the same. Use it for bank withdrawals, wallet settlements to the bank, or any transfer. A contra (CV) voucher number is created.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="From">
+              <select style={inputStyle} value={mv.from} onChange={(e) => setMv({ ...mv, from: e.target.value })}>
+                {LIQUID_ACCOUNTS.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+              </select>
+            </Field>
+            <Field label="To">
+              <select style={inputStyle} value={mv.to} onChange={(e) => setMv({ ...mv, to: e.target.value })}>
+                {LIQUID_ACCOUNTS.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+              </select>
+            </Field>
+          </div>
+          <div style={{ fontSize: 11.5, color: T.plum, marginTop: -6, marginBottom: 12 }}>{label(mv.from)} now: {money(liquidity.byId[mv.from].balance)}</div>
+          <Field label="Amount (Rs)"><input autoFocus type="number" min="0" style={inputStyle} value={mv.amount} onChange={(e) => setMv({ ...mv, amount: e.target.value })} /></Field>
+          <Field label="Date"><input type="date" style={inputStyle} value={mv.date} onChange={(e) => setMv({ ...mv, date: e.target.value })} /></Field>
+          <Field label="Notes"><input style={inputStyle} value={mv.notes} onChange={(e) => setMv({ ...mv, notes: e.target.value })} placeholder="Optional — e.g. bank slip number" /></Field>
+          <Btn variant="primary" disabled={busy} onClick={submitMove} style={{ width: "100%", justifyContent: "center" }}>{busy ? "Saving…" : "Move Money"}</Btn>
+        </Modal>
+      )}
+
+      {openingOpen && (
+        <Modal title="Opening Balances" onClose={() => setOpeningOpen(false)} width={460}>
+          <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 12 }}>
+            Count the cash drawer and check each wallet and bank balance, then enter the real amounts. From the date below, balances are calculated from these numbers plus new entries. Anything recorded before that date stops counting.
+          </div>
+          <Field label="Balances are true from (date)"><input type="date" style={inputStyle} value={op.asOf} onChange={(e) => setOp({ ...op, asOf: e.target.value })} /></Field>
+          {LIQUID_ACCOUNTS.map((a) => (
+            <Field key={a.id} label={`${a.label} (Rs)  ·  system shows ${money(liquidity.byId[a.id].balance)}`}>
+              <input type="number" min="0" style={inputStyle} value={op.amounts[a.id] ?? ""} onChange={(e) => setOp({ ...op, amounts: { ...op.amounts, [a.id]: e.target.value } })} placeholder="0" />
+            </Field>
+          ))}
+          <Btn variant="primary" disabled={busy} onClick={submitOpening} style={{ width: "100%", justifyContent: "center" }}>{busy ? "Saving…" : "Save Opening Balances"}</Btn>
+        </Modal>
+      )}
+    </Card>
   );
 }
 
@@ -2793,35 +3219,195 @@ function SalesReport({ orders, menu }) {
   );
 }
 
-/* ================= DIGITAL QR MENU ================= */
-function QRMenu({ menu }) {
-  const categories = [...new Set(menu.map((m) => m.category))];
+/* ================= PUBLIC CUSTOMER MENU (opened from the QR code, no login) ================= */
+function PublicMenu() {
+  const params = new URLSearchParams(window.location.search);
+  const tableName = (params.get("table") || "").slice(0, 24);
+  const [items, setItems] = useState(null);
+  const [error, setError] = useState("");
+  const [query, setQuery] = useState("");
+  const [cat, setCat] = useState("All");
+
+  useEffect(() => {
+    document.title = "Parijat Cafe — Menu";
+    let cancelled = false;
+    let loaded = false;
+    const load = async () => {
+      let rows = null;
+      try {
+        // preferred: a database function that returns only what a customer may see
+        const r1 = await supabase.rpc("get_public_menu");
+        if (!r1.error && Array.isArray(r1.data)) rows = r1.data;
+        else {
+          // fallback (works before the V6 SQL step): the same safe columns only — never recipes or costs
+          const r2 = await supabase.from("menu_items").select("id,name,category,price,veg,available");
+          if (!r2.error && Array.isArray(r2.data)) rows = r2.data;
+        }
+      } catch (e) { /* handled below */ }
+      if (cancelled) return;
+      if (rows) {
+        loaded = true;
+        setItems(rows.map((r) => ({ id: r.id, name: r.name, category: r.category || "Other", price: Number(r.price) || 0, veg: !!r.veg, available: r.available !== false })));
+        setError("");
+      } else if (!loaded) {
+        setError("The menu could not be loaded right now. Please ask our staff.");
+      }
+    };
+    load();
+    const timer = setInterval(load, 60000); // pick up price / availability changes without a reload
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
+
+  const q = query.trim().toLowerCase();
+  const categories = items ? Array.from(new Set(items.map((m) => m.category))).sort() : [];
+  const visible = (items || []).filter((m) => (cat === "All" || m.category === cat) && (!q || m.name.toLowerCase().includes(q)));
+  const groups = categories
+    .map((c) => [c, visible.filter((m) => m.category === c).sort((a, b) => a.name.localeCompare(b.name))])
+    .filter(([, list]) => list.length > 0);
+
+  const VegMark = ({ veg }) => (
+    <span title={veg ? "Vegetarian" : "Non-vegetarian"} style={{ width: 15, height: 15, border: `1.5px solid ${veg ? "#15803D" : "#B91C1C"}`, borderRadius: 3, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+      <span style={{ width: 7, height: 7, borderRadius: "50%", background: veg ? "#15803D" : "#B91C1C" }} />
+    </span>
+  );
+
   return (
-    <div style={{ display: "flex", gap: 30, flexWrap: "wrap" }}>
-      <Card style={{ padding: 24, textAlign: "center", height: "fit-content", width: 220 }}>
-        <div style={{ width: 160, height: 160, margin: "0 auto 14px", background: `repeating-linear-gradient(45deg, ${T.dusk} 0 6px, #fff 6px 12px)`, borderRadius: 8, position: "relative" }}>
-          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <div style={{ background: "#fff", padding: 10, borderRadius: 6 }}><QrCode size={48} color={T.dusk} /></div>
+    <div style={{ minHeight: "100vh", background: T.cream, fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif", color: T.ink }}>
+      <div style={{ background: T.dusk, color: "#fff", padding: "22px 18px 18px" }}>
+        <div style={{ maxWidth: 560, margin: "0 auto" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <svg width="24" height="24" viewBox="0 0 40 40"><path d="M20 4C20 4 26 12 26 18C26 22.4 23.3 26 20 26C16.7 26 14 22.4 14 18C14 12 20 4 20 4Z" fill="#6EA2FF" /></svg>
+            <div style={{ fontSize: 22, fontWeight: 800 }}>Parijat Cafe</div>
           </div>
+          <div style={{ fontSize: 13, opacity: 0.8, marginTop: 4 }}>{tableName ? `Welcome! You are at table ${tableName}.` : "Welcome! Here is our menu."}</div>
         </div>
-        <div style={{ fontSize: 12.5, color: T.plum }}>Scan at the table to open Parijat Cafe's live menu — no app needed.</div>
-      </Card>
-      <div style={{ flex: 1, minWidth: 280 }}>
-        <div style={{ background: T.dusk, color: T.petal, borderRadius: 14, padding: "26px 22px" }}>
-          <div style={{ fontFamily: "inherit", fontSize: 20, marginBottom: 4 }}>Parijat Cafe</div>
-          <div style={{ fontSize: 12, color: T.gold, marginBottom: 20 }}>Digital Menu · Updated live</div>
-          {categories.map((cat) => (
-            <div key={cat} style={{ marginBottom: 18 }}>
-              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1, color: "#B8ADD1", marginBottom: 8 }}>{cat}</div>
-              {menu.filter((m) => m.category === cat && m.available).map((m) => (
-                <div key={m.id} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px dashed rgba(255,255,255,0.12)", fontSize: 13.5 }}>
-                  <span>{m.name}</span><span style={{ color: T.gold, fontFamily: "monospace" }}>{money(m.price)}</span>
+      </div>
+
+      <div style={{ position: "sticky", top: 0, zIndex: 5, background: T.cream, borderBottom: `1px solid ${T.line}`, padding: "10px 14px" }}>
+        <div style={{ maxWidth: 560, margin: "0 auto" }}>
+          <input placeholder="Search the menu…" value={query} onChange={(e) => setQuery(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "11px 13px", border: `1px solid ${T.line}`, borderRadius: 10, fontSize: 15, fontFamily: "inherit", background: "#fff" }} />
+          {categories.length > 1 && (
+            <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingTop: 10, paddingBottom: 2 }}>
+              {["All", ...categories].map((c) => (
+                <button key={c} onClick={() => setCat(c)} style={{ flexShrink: 0, padding: "7px 13px", borderRadius: 20, border: `1px solid ${cat === c ? T.dusk : T.line}`, background: cat === c ? T.dusk : "#fff", color: cat === c ? "#fff" : T.dusk, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>{c}</button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 560, margin: "0 auto", padding: "14px 14px 40px" }}>
+        {error && <div style={{ background: "#FEE2E2", color: "#991B1B", padding: 14, borderRadius: 10, fontSize: 14 }}>{error}</div>}
+        {!error && items === null && <div style={{ textAlign: "center", color: T.plum, padding: 40, fontSize: 14 }}>Loading our menu…</div>}
+        {!error && items !== null && groups.length === 0 && <div style={{ textAlign: "center", color: T.plum, padding: 40, fontSize: 14 }}>{items.length ? "Nothing matches your search." : "The menu is empty right now."}</div>}
+        {groups.map(([category, list]) => (
+          <div key={category} style={{ marginBottom: 22 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase", color: T.gold, marginBottom: 8 }}>{category}</div>
+            <div style={{ background: "#fff", border: `1px solid ${T.line}`, borderRadius: 12, overflow: "hidden" }}>
+              {list.map((m, i) => (
+                <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 14px", borderTop: i ? `1px solid ${T.line}` : "none", opacity: m.available ? 1 : 0.5 }}>
+                  <VegMark veg={m.veg} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 15, fontWeight: 600 }}>{m.name}</div>
+                    {!m.available && <div style={{ fontSize: 12, color: T.red, fontWeight: 600 }}>Sold out right now</div>}
+                  </div>
+                  <div style={{ fontSize: 15, fontWeight: 700, whiteSpace: "nowrap" }}>{money(m.price)}</div>
                 </div>
               ))}
             </div>
-          ))}
-        </div>
+          </div>
+        ))}
+        {items !== null && !error && <div style={{ textAlign: "center", fontSize: 12, color: T.plum, opacity: 0.8, marginTop: 8 }}>Please tell our staff about any food allergies. To order, call our staff to your table.</div>}
       </div>
+    </div>
+  );
+}
+
+/* ================= DIGITAL QR MENU (staff screen: link, QR codes, printing) ================= */
+function QRMenu({ tables }) {
+  const [base, setBase] = useState(() => {
+    try { return localStorage.getItem("parijat_public_base") || window.location.origin; } catch (e) { return window.location.origin; }
+  });
+  const [copied, setCopied] = useState(false);
+  const cleanBase = base.trim().replace(/\/+$/, "");
+  const menuUrl = `${cleanBase}/?menu=1`;
+  const tableUrl = (name) => `${menuUrl}&table=${encodeURIComponent(name)}`;
+  const updateBase = (v) => { setBase(v); try { localStorage.setItem("parijat_public_base", v); } catch (e) { /* ignore */ } };
+
+  const copyLink = async () => {
+    try { await navigator.clipboard.writeText(menuUrl); setCopied(true); setTimeout(() => setCopied(false), 2000); }
+    catch (e) { window.prompt("Copy this link:", menuUrl); }
+  };
+
+  // opens the print window straight away (inside the click, so pop-up blockers allow it)
+  const printCards = (cards) => {
+    const win = window.open("", "_blank");
+    if (!win) { alert("Please allow pop-ups for this site to print the QR codes."); return; }
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Menu QR codes</title><style>
+      @page { margin: 12mm; }
+      body { font-family: Arial, sans-serif; color: #14213D; margin: 0; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+      .card { border: 2px solid #14213D; border-radius: 14px; padding: 16px; text-align: center; page-break-inside: avoid; }
+      .cafe { font-size: 20px; font-weight: 700; }
+      .scan { font-size: 13px; color: #555; margin: 2px 0 8px; }
+      .label { font-size: 26px; font-weight: 700; margin-top: 6px; }
+      svg { width: 230px; height: 230px; }
+    </style></head><body><div class="grid">${cards.map((c) => `<div class="card"><div class="cafe">Parijat Cafe</div><div class="scan">Scan to view our menu</div>${qrSvg(c.url, 230)}<div class="label">${escHtml(c.label)}</div></div>`).join("")}</div><script>window.onload = function () { window.print(); };</script></body></html>`;
+    win.document.write(html);
+    win.document.close();
+  };
+
+  const tableList = (tables || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true }));
+
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <Card style={{ padding: 20 }}>
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start" }}>
+          <div style={{ textAlign: "center" }}>
+            <div dangerouslySetInnerHTML={{ __html: qrSvg(menuUrl, 190) }} style={{ border: `1px solid ${T.line}`, borderRadius: 10, overflow: "hidden", lineHeight: 0 }} />
+            <div style={{ fontSize: 12, color: T.plum, marginTop: 6 }}>General menu QR</div>
+          </div>
+          <div style={{ flex: 1, minWidth: 260 }}>
+            <h3 style={{ fontSize: 15, color: T.dusk, marginBottom: 6 }}>Customer menu link</h3>
+            <div style={{ fontSize: 12.5, color: T.plum, marginBottom: 10 }}>
+              Customers scan a code and see your live menu in their phone's browser. No app, no login. Prices and “sold out” follow what you set in Menu Management, usually within a minute.
+            </div>
+            <Field label="Website address">
+              <input style={inputStyle} value={base} onChange={(e) => updateBase(e.target.value)} placeholder="https://parijat-cafe-app.vercel.app" />
+            </Field>
+            <div style={{ fontSize: 12, fontFamily: "monospace", background: T.cream, padding: "8px 10px", borderRadius: 8, wordBreak: "break-all", marginBottom: 10 }}>{menuUrl}</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Btn variant="primary" onClick={copyLink}>{copied ? "Copied ✓" : "Copy link"}</Btn>
+              <Btn variant="ghost" onClick={() => window.open(menuUrl, "_blank")}>Open customer view</Btn>
+              <Btn variant="ghost" onClick={() => printCards([{ label: "Our Menu", url: menuUrl }])}><Printer size={14} /> Print this QR</Btn>
+            </div>
+            <div style={{ fontSize: 11.5, color: T.plum, opacity: 0.8, marginTop: 10, lineHeight: 1.5 }}>
+              Use your permanent address (not a temporary preview link), so printed codes keep working. If you later buy your own domain, change the address above and print the codes again.
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <Card style={{ padding: 20 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+          <div>
+            <h3 style={{ fontSize: 15, color: T.dusk, marginBottom: 2 }}>Table QR codes</h3>
+            <div style={{ fontSize: 12, color: T.plum }}>Each code opens the same menu and greets the guest with their table name.</div>
+          </div>
+          <Btn variant="primary" disabled={!tableList.length} onClick={() => printCards(tableList.map((t) => ({ label: `Table ${t.name}`, url: tableUrl(t.name) })))}><Printer size={14} /> Print all table QR codes</Btn>
+        </div>
+        {tableList.length === 0 ? <Empty text="Add tables in Table & Space to create table QR codes." /> : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 12 }}>
+            {tableList.map((t) => (
+              <div key={t.id} style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: 12, textAlign: "center" }}>
+                <div dangerouslySetInnerHTML={{ __html: qrSvg(tableUrl(t.name), 130) }} style={{ lineHeight: 0 }} />
+                <div style={{ fontWeight: 700, margin: "6px 0 8px", color: T.dusk }}>Table {t.name}</div>
+                <Btn variant="ghost" onClick={() => printCards([{ label: `Table ${t.name}`, url: tableUrl(t.name) }])} style={{ width: "100%", justifyContent: "center", fontSize: 12, padding: "6px 10px" }}><Printer size={13} /> Print</Btn>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
@@ -3654,4 +4240,11 @@ function PurchaseManagement({ purchases, setPurchases, inventory, setInventory, 
       )}
     </div>
   );
+}
+
+// The same website serves two things: the staff dashboard, and the public customer menu
+// (opened by scanning a table QR code: https://<your-site>/?menu=1&table=T3). The menu page never loads staff data.
+export default function Root() {
+  const isPublicMenu = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("menu");
+  return isPublicMenu ? <PublicMenu /> : <App />;
 }
